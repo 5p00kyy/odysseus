@@ -113,11 +113,12 @@ def test_validate_serve_cmd_accepts_llama_native_fallback_launch():
         'MODEL_FILE=$({ find "$HOME/.cache/huggingface" -type f -name "*.gguf"; } | head -1) '
         '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
         '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'if command -v llama-server >/dev/null 2>&1; then '
         'CUDA_VISIBLE_DEVICES=0 llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
         '-ngl 99 -c 8192 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
-        '--spec-type draft-mtp --spec-draft-n-max 3 || '
+        '--spec-type draft-mtp --spec-draft-n-max 3; else '
         'CUDA_VISIBLE_DEVICES=0 python3 -m llama_cpp.server --model "$MODEL_FILE" '
-        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192'
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
     )
     assert _validate_serve_cmd(cmd) == cmd
 

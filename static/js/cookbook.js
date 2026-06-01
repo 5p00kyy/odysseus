@@ -447,7 +447,7 @@ export function _buildServeCmd(f, modelName, backend) {
       cmd += _lcpServer;
     } else {
       const _nativeServer = `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_llamaMemArgStr}${_llamaSpecArgStr}`;
-      cmd += `${_nativeServer} || ${_lcpServer}`;
+      cmd += `if command -v llama-server >/dev/null 2>&1; then ${_nativeServer}; else ${_lcpServer}; fi`;
     }
   } else if (backend === 'ollama') {
     const ollamaPort = f.port || '11434';
