@@ -38,7 +38,33 @@ function _inferBaseRepo(text) {
   return null;
 }
 
+function _currentServeCmd(panel) {
+  const taskEl = panel?.closest?.('.cookbook-task');
+  if (!taskEl) return '';
+  const task = _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId);
+  return task?.payload?._cmd || '';
+}
+
+function _cmdHasFlagValue(cmd, flag, value) {
+  const re = new RegExp(flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+' + String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:\\s|$)');
+  return re.test(cmd || '');
+}
+
 export const ERROR_PATTERNS = [
+  {
+    match: (text) => (
+      /CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory/i.test(text || '')
+      && /unquantized_fused_moe_method|W4A16_NVFP4|NVFP4/i.test(text || '')
+    ),
+    message: 'NVFP4 MoE weights appear to be loading without ModelOpt quantization.',
+    fixes: [
+      {
+        label: 'Retry with modelopt',
+        show: (panel) => !_cmdHasFlagValue(_currentServeCmd(panel), '--quantization', 'modelopt'),
+        action: (panel) => _serveAutoRetryReplace(panel, '--quantization', 'modelopt'),
+      },
+    ],
+  },
   {
     pattern: /No available memory for the cache blocks|Available KV cache memory:.*-/i,
     message: 'No GPU memory left for KV cache after loading model.',
@@ -61,8 +87,8 @@ export const ERROR_PATTERNS = [
     pattern: /CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory/i,
     message: 'GPU ran out of memory. Try more GPUs (higher TP) or lower context.',
     fixes: [
-      { label: 'Retry with TP=2', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '2') },
-      { label: 'Retry with TP=4', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '4') },
+      { label: 'Retry with TP=2', show: (panel) => !_cmdHasFlagValue(_currentServeCmd(panel), '--tensor-parallel-size', '2'), action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '2') },
+      { label: 'Retry with TP=4', show: (panel) => !_cmdHasFlagValue(_currentServeCmd(panel), '--tensor-parallel-size', '4'), action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '4') },
       { label: 'Retry with GPU mem 0.80', action: (panel) => _serveAutoRetryReplace(panel, '--gpu-memory-utilization', '0.80') },
       { label: 'Retry with context 4096', action: (panel) => _serveAutoRetryReplace(panel, '--max-model-len', '4096') },
       { label: 'Retry with --enforce-eager', action: (panel) => _serveAutoRetry(panel, '--enforce-eager') },
@@ -116,10 +142,10 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /Address already in use|bind.*address.*in use/i,
+    pattern: /Address already in use|bind.*address.*in use|couldn'?t bind HTTP server socket/i,
     message: 'Port is already in use. Another server may be running.',
     fixes: [
-      { label: 'Kill existing vLLM', action: (panel) => _runQuickCmd(panel, 'pkill -f vllm') },
+      { label: 'Check port 8000', action: (panel) => _runQuickCmd(panel, 'ss -ltnp | grep ":8000 " || docker ps --filter publish=8000 --format "{{.Names}} {{.Image}} {{.Ports}}"') },
       { label: 'Use port 8001', action: (panel) => _setPanelField(panel, 'port', '8001') },
     ],
   },
@@ -439,6 +465,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
     const row = document.createElement('div');
     row.className = 'cookbook-diag-fixes';
     for (const fix of diagnosis.fixes) {
+      if (fix.show && !fix.show(panel, sourceText)) continue;
       const btn = document.createElement('button');
       btn.className = 'cookbook-btn cookbook-diag-btn';
       btn.textContent = fix.label;

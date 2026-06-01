@@ -18,6 +18,7 @@ import {
   _launchServeTask, _serveAutoFix, _serveAutoRetry, _serveAutoRetryReplace, _serveAutoRetryRemove,
   _startBackgroundMonitor, _syncFromServer,
   _retryDownload, _nextAvailablePort, _processQueue,
+  _fetchBackendReadinessForServe,
 } from './cookbookRunning.js';
 
 import {
@@ -340,33 +341,59 @@ export function _buildServeCmd(f, modelName, backend) {
   let cmd = '';
   if (backend === 'vllm') {
     const gpuId = f.gpu_id?.trim() || '';
-    if (gpuId) cmd += `CUDA_VISIBLE_DEVICES=${gpuId} `;
-    if (f.moe_env) {
-      const _opts = _detectModelOptimizations(modelName);
-      if (_opts.envVars.length) cmd += _opts.envVars.join(' ') + ' ';
-    }
-    cmd += `vllm serve ${modelName} --host 0.0.0.0 --port ${f.port || '8000'}`;
-    cmd += ` --tensor-parallel-size ${f.tp || '1'}`;
-    cmd += ` --max-model-len ${f.ctx || '8192'}`;
-    cmd += ` --gpu-memory-utilization ${f.gpu_mem || '0.90'}`;
-    if (f.swap && f.swap !== '0') cmd += ` --swap-space ${f.swap}`;
-    cmd += ` --dtype ${f.dtype || 'auto'}`;
-    if (f.max_seqs && f.max_seqs.toString().trim()) cmd += ` --max-num-seqs ${f.max_seqs.toString().trim()}`;
-    if (f.enforce_eager) cmd += ' --enforce-eager';
-    if (f.trust_remote) cmd += ' --trust-remote-code';
-    if (f.prefix_cache) cmd += ' --enable-prefix-caching';
-    if (f.auto_tool) cmd += ` --enable-auto-tool-choice --tool-call-parser ${_detectToolParser(modelName)}`;
-    if (f.expert_parallel) cmd += ' --enable-expert-parallel';
+    const _vllmArgs = [];
+    _vllmArgs.push(`--host 0.0.0.0 --port ${f.launch_mode === 'docker' ? '8000' : (f.port || '8000')}`);
+    _vllmArgs.push(`--tensor-parallel-size ${f.tp || '1'}`);
+    _vllmArgs.push(`--max-model-len ${f.ctx || '8192'}`);
+    _vllmArgs.push(`--gpu-memory-utilization ${f.gpu_mem || '0.90'}`);
+    if (f.vllm_kv_cache_dtype && f.vllm_kv_cache_dtype !== 'auto') _vllmArgs.push(`--kv-cache-dtype ${f.vllm_kv_cache_dtype}`);
+    if (f.vllm_kv_offload_gb && f.vllm_kv_offload_gb.toString().trim()) _vllmArgs.push(`--kv-offloading-size ${f.vllm_kv_offload_gb.toString().trim()}`);
+    if (f.swap && f.swap !== '0') _vllmArgs.push(`--swap-space ${f.swap}`);
+    const quantization = _detectVllmQuantization(modelName, f.quant || f.quantization || '', f.extra || '');
+    if (quantization) _vllmArgs.push(`--quantization ${quantization}`);
+    _vllmArgs.push(`--dtype ${f.dtype || 'auto'}`);
+    if (f.max_seqs && f.max_seqs.toString().trim()) _vllmArgs.push(`--max-num-seqs ${f.max_seqs.toString().trim()}`);
+    if (f.enforce_eager) _vllmArgs.push('--enforce-eager');
+    if (f.trust_remote) _vllmArgs.push('--trust-remote-code');
+    if (f.prefix_cache) _vllmArgs.push('--enable-prefix-caching');
+    if (f.auto_tool) _vllmArgs.push(`--enable-auto-tool-choice --tool-call-parser ${_detectToolParser(modelName)}`);
+    if (f.expert_parallel) _vllmArgs.push('--enable-expert-parallel');
     if (f.reasoning_parser) {
       const rp = typeof f.reasoning_parser === 'string' && f.reasoning_parser !== 'true'
         ? f.reasoning_parser : (f._reasoning_parser_value || 'qwen3');
-      cmd += ` --reasoning-parser ${rp}`;
+      _vllmArgs.push(`--reasoning-parser ${rp}`);
     }
     if (f.speculative) {
       const _specMethod = (f.spec_method || 'mtp').trim() || 'mtp';
       const _specToksRaw = parseInt(f.spec_tokens, 10);
       const _specToks = (Number.isFinite(_specToksRaw) && _specToksRaw > 0) ? _specToksRaw : 3;
-      cmd += ` --speculative-config '{"method":"${_specMethod}","num_speculative_tokens":${_specToks}}'`;
+      _vllmArgs.push(`--speculative-config '{"method":"${_specMethod}","num_speculative_tokens":${_specToks}}'`);
+    }
+    if (f.launch_mode === 'docker') {
+      const dockerRuntime = (f.docker_runtime || 'nvidia').trim();
+      const image = (f.docker_image || '').trim()
+        || (dockerRuntime === 'rocm' ? 'vllm/vllm-openai-rocm:latest' : 'vllm/vllm-openai:latest');
+      const devices = (f.gpus || gpuId || '').trim();
+      const envs = ['--env "HF_TOKEN=$HF_TOKEN"'];
+      if (f.moe_env) {
+        const _opts = _detectModelOptimizations(modelName);
+        _opts.envVars.forEach(v => envs.push(`--env ${_shellQuote(v)}`));
+      }
+      if (dockerRuntime === 'rocm') {
+        cmd += 'docker run --rm --group-add=video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --device /dev/kfd --device /dev/dri ';
+      } else {
+        const gpuOpt = devices ? `--gpus '"device=${devices}"'` : '--gpus all';
+        cmd += `docker run --rm ${gpuOpt} `;
+      }
+      cmd += `-v "\${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface" ${envs.join(' ')} `;
+      cmd += `-p ${f.port || '8000'}:8000 --ipc=host ${_shellQuote(image)} ${_shellQuote(modelName)} ${_vllmArgs.join(' ')}`;
+    } else {
+      if (gpuId) cmd += `CUDA_VISIBLE_DEVICES=${gpuId} `;
+      if (f.moe_env) {
+        const _opts = _detectModelOptimizations(modelName);
+        if (_opts.envVars.length) cmd += _opts.envVars.join(' ') + ' ';
+      }
+      cmd += `vllm serve ${modelName} ${_vllmArgs.join(' ')}`;
     }
   } else if (backend === 'sglang') {
     const gpuId = f.gpu_id?.trim() || '';
@@ -400,14 +427,27 @@ export function _buildServeCmd(f, modelName, backend) {
     const modelArg = _isWindows() ? `"${ggufPath}"` : `"$MODEL_FILE"`;
     // Prefer the native llama-server binary on Linux — its minja templating
     // renders modern GGUF chat templates that the Python bindings' Jinja2
-    // rejects (do_tojson ensure_ascii). Fall back to llama_cpp.server.
-    // Don't suppress stderr — surface real errors (missing file, lib, OOM).
+    // rejects (do_tojson ensure_ascii). Keep the long-standing simple fallback
+    // shape here; diagnosis prioritizes native server errors before fallback
+    // package errors so useful failures stay visible.
+    const _llamaMemArgs = [];
+    if (f.llama_cache_k && f.llama_cache_k !== 'f16') _llamaMemArgs.push(`--cache-type-k ${f.llama_cache_k}`);
+    if (f.llama_cache_v && f.llama_cache_v !== 'f16') _llamaMemArgs.push(`--cache-type-v ${f.llama_cache_v}`);
+    if (f.llama_flash_attn && f.llama_flash_attn !== 'auto') _llamaMemArgs.push(`--flash-attn ${f.llama_flash_attn}`);
+    const _llamaMemArgStr = _llamaMemArgs.length ? ` ${_llamaMemArgs.join(' ')}` : '';
+    const _llamaSpecArgs = [];
+    if (f.llama_speculative_mtp) {
+      const specTokens = parseInt(f.llama_spec_tokens, 10);
+      const specN = Number.isFinite(specTokens) && specTokens > 0 ? specTokens : 3;
+      _llamaSpecArgs.push(`--spec-type draft-mtp --spec-draft-n-max ${specN}`);
+    }
+    const _llamaSpecArgStr = _llamaSpecArgs.length ? ` ${_llamaSpecArgs.join(' ')}` : '';
     const _lcpServer = `${lcPrefix}${py} -m llama_cpp.server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} --n_gpu_layers ${f.ngl || '99'} --n_ctx ${f.ctx || '8192'}`;
     if (_isWindows()) {
       cmd += _lcpServer;
     } else {
-      cmd += `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}`;
-      cmd += ` || ${_lcpServer}`;
+      const _nativeServer = `${lcPrefix}llama-server --model ${modelArg} --host 0.0.0.0 --port ${f.port || '8080'} -ngl ${f.ngl || '99'} -c ${f.ctx || '8192'}${_llamaMemArgStr}${_llamaSpecArgStr}`;
+      cmd += `${_nativeServer} || ${_lcpServer}`;
     }
   } else if (backend === 'ollama') {
     const ollamaPort = f.port || '11434';
@@ -428,6 +468,15 @@ export function _buildServeCmd(f, modelName, backend) {
     if (f.diff_harmonize_gpu) cmd += ` --harmonize-gpu ${f.diff_harmonize_gpu}`;
   }
   return cmd;
+}
+
+export function _detectVllmQuantization(modelName, quant = '', extra = '') {
+  const existing = `${extra || ''}`;
+  if (/(^|\s)--quantization(?:\s|=)/.test(existing)) return '';
+  const haystack = `${modelName || ''} ${quant || ''}`.toUpperCase();
+  if (haystack.includes('NVFP4') || haystack.includes('W4A16_NVFP4')) return 'modelopt';
+  if (String(quant || '').toUpperCase() === 'FP4' || /(^|[-_\s/])FP4($|[-_\s])/.test(haystack)) return 'modelopt';
+  return '';
 }
 
 /** Get inline logo HTML for a model name/repo_id */
@@ -539,8 +588,22 @@ async function _fetchDependencies() {
     if (!pkgs.length) { list.innerHTML = '<div class="hwfit-loading">No packages found</div>'; return; }
     const _winUnsupported = new Set(['diffusers', 'hf_transfer', 'vllm', 'rembg', 'gfpgan']);
 
+    const _modeState = (pkg) => {
+      const modes = Array.isArray(pkg.modes) ? pkg.modes : [];
+      if (!modes.length) return null;
+      if (modes.some(m => m.status === 'ready')) return 'ready';
+      if (modes.some(m => m.status === 'warn')) return 'warn';
+      return 'missing';
+    };
+
     const _statusTag = (pkg, isLocal, isSystemDep, winBlocked) => {
       if (winBlocked) return `<span class="cookbook-dep-tag cookbook-dep-na">N/A</span>`;
+      const modeState = _modeState(pkg);
+      if (modeState) {
+        const label = pkg.installed ? 'Installed' : (modeState === 'ready' ? 'Partial' : (modeState === 'warn' ? 'Check' : 'Missing'));
+        const cls = modeState === 'ready' || pkg.installed ? 'cookbook-dep-installed' : 'cookbook-dep-na';
+        return `<button class="cookbook-dep-tag ${cls} cookbook-dep-menu-btn" title="View dependency readiness details"><span class="cookbook-dep-installed-label">${label}</span><span class="cookbook-dep-caret">&#9662;</span></button>`;
+      }
       if (pkg.installed && isSystemDep) return `<span class="cookbook-dep-tag cookbook-dep-installed" title="Found on selected server">Installed</span>`;
       if (pkg.installed) return `<button class="cookbook-dep-tag cookbook-dep-installed cookbook-dep-installed-btn" title="Installed — click for actions"><span class="cookbook-dep-installed-label">Installed</span><span class="cookbook-dep-caret">&#9662;</span></button>`;
       if (isSystemDep) {
@@ -556,11 +619,20 @@ async function _fetchDependencies() {
       const isSystemDep = pkg.kind === 'system';
       const winBlocked = !isLocal && _isWindows() && _winUnsupported.has(pkg.name);
       const note = pkg.status_note ? `<div class="memory-item-meta" style="font-size:10px;opacity:0.65;margin-top:3px;">${esc(pkg.status_note)}</div>` : '';
+      const modes = Array.isArray(pkg.modes) ? pkg.modes : [];
+      const modeChips = modes.length
+        ? `<div class="cookbook-dep-modes">` + modes.map(m => {
+            const state = (m.status || 'missing').toLowerCase();
+            const detail = m.detail ? ` title="${esc(m.detail)}"` : '';
+            return `<span class="cookbook-dep-mode cookbook-dep-mode-${esc(state)}"${detail}>${esc(m.label)}</span>`;
+          }).join('') + `</div>`
+        : '';
       return `<div class="cookbook-dep-row${winBlocked ? ' cookbook-dep-blocked' : ''}" data-pkg-name="${esc(pkg.name)}" data-dep-pip="${esc(pkg.pip || '')}" data-dep-target="${isLocal ? 'local' : 'remote'}" data-dep-kind="${esc(pkg.kind || 'python')}">`
         + `<div class="cookbook-dep-info">`
         + `<div class="memory-item-title">${esc(pkg.name)}</div>`
         + `<div class="memory-item-meta" style="font-size:10px;opacity:0.5;margin-top:2px;">${esc(pkg.desc)}</div>`
         + note
+        + modeChips
         + `</div>`
         + `<span class="cookbook-dep-tag cookbook-dep-cat">${esc(pkg.category)}</span>`
         + _statusTag(pkg, isLocal, isSystemDep, winBlocked)
@@ -661,32 +733,76 @@ async function _fetchDependencies() {
       });
     });
 
-    // Wire the ⋮ menu on installed packages — currently just "Update".
+    // Wire the row menu. Installed pip packages get update/install actions;
+    // richer engine rows use the same menu for compact readiness details.
     function _showDepMenu(anchor) {
       document.querySelectorAll('.cookbook-dep-menu').forEach(d => d.remove());
       const row = anchor.closest('.cookbook-dep-row');
       if (!row) return;
+      const pkg = pkgs.find(p => p.name === row.dataset.pkgName) || {};
+      const modes = Array.isArray(pkg.modes) ? pkg.modes : [];
       const pipName = row.dataset.depPip;
       const pkgName = row.querySelector('.memory-item-title')?.textContent || pipName;
       const isLocalOnly = row.dataset.depTarget === 'local';
       const dropdown = document.createElement('div');
       dropdown.className = 'dropdown cookbook-dep-menu';
       const rect = anchor.getBoundingClientRect();
-      const minW = 150;
+      const minW = modes.length ? 260 : 150;
       let left = Math.min(rect.right - minW, window.innerWidth - minW - 8);
       left = Math.max(8, left);
       dropdown.style.cssText = `position:fixed;display:block;z-index:10001;top:${rect.bottom + 6}px;left:${left}px;right:auto;min-width:${minW}px;max-width:calc(100vw - 16px);background:var(--panel,var(--bg));border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.3);padding:6px;font-size:11px;`;
       const upIco = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>';
-      const it = document.createElement('div');
-      it.className = 'dropdown-item-compact';
-      it.innerHTML = `<span class="dropdown-icon">${upIco}</span><span>Update</span>`;
-      it.title = `Update ${pkgName} to the latest version (pip install -U)`;
-      it.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        dropdown.remove();
-        await _installDep(pipName, pkgName, isLocalOnly, true, null);
-      });
-      dropdown.appendChild(it);
+      const addItem = (label, title, onClick, icon = upIco) => {
+        const it = document.createElement('div');
+        it.className = 'dropdown-item-compact';
+        it.innerHTML = `<span class="dropdown-icon">${icon}</span><span>${esc(label)}</span>`;
+        if (title) it.title = title;
+        it.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          dropdown.remove();
+          await onClick(e);
+        });
+        dropdown.appendChild(it);
+      };
+      if (modes.length) {
+        const details = document.createElement('div');
+        details.className = 'cookbook-dep-menu-details';
+        details.innerHTML = modes.map(m => {
+          const state = (m.status || 'missing').toLowerCase();
+          const detail = m.detail || '';
+          return `<div class="cookbook-dep-menu-mode cookbook-dep-menu-mode-${esc(state)}"><span>${esc(m.label)}</span><small>${esc(detail)}</small></div>`;
+        }).join('');
+        dropdown.appendChild(details);
+      }
+      const addInfo = (text) => {
+        const it = document.createElement('div');
+        it.className = 'dropdown-item-compact muted';
+        it.textContent = text;
+        dropdown.appendChild(it);
+      };
+      const isVllm = pkg.name === 'vllm';
+      const vllmCliReady = modes.some(m => String(m.label || '').toLowerCase() === 'cli' && m.status === 'ready');
+      const vllmDockerReady = modes.some(m => String(m.label || '').toLowerCase() === 'docker' && m.status === 'ready');
+      if (isVllm && vllmDockerReady && !vllmCliReady) {
+        addInfo('Docker image available. Use Serve → vLLM → Mode: Docker, or install CLI separately.');
+      }
+      if (pipName) {
+        const installLabel = isVllm
+          ? (pkg.installed ? 'Update vLLM CLI package' : 'Install vLLM CLI in selected env')
+          : (pkg.installed ? 'Update Python package' : 'Install/repair Python package');
+        const installTitle = isVllm
+          ? `Run pip ${pkg.installed ? 'install -U' : 'install'} for bare-metal vLLM CLI mode only. Docker mode uses an image tag instead.`
+          : `Run pip ${pkg.installed ? 'install -U' : 'install'} for ${pkgName} in the selected target environment`;
+        addItem(installLabel, installTitle, async () => {
+          await _installDep(pipName, pkgName, isLocalOnly, !!pkg.installed, null);
+        });
+      }
+      if (!modes.length && !pipName) {
+        const it = document.createElement('div');
+        it.className = 'dropdown-item-compact muted';
+        it.textContent = 'No actions available';
+        dropdown.appendChild(it);
+      }
       document.body.appendChild(dropdown);
       const close = (ev) => {
         if (!dropdown.contains(ev.target) && ev.target !== anchor && !anchor.contains(ev.target)) {
@@ -696,7 +812,7 @@ async function _fetchDependencies() {
       };
       setTimeout(() => document.addEventListener('click', close, true), 10);
     }
-    list.querySelectorAll('.cookbook-dep-installed-btn').forEach(btn => {
+    list.querySelectorAll('.cookbook-dep-installed-btn, .cookbook-dep-menu-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (document.querySelector('.cookbook-dep-menu')) {
@@ -1821,6 +1937,7 @@ initDownload({
 initServe({
   ...shared,
   _launchServeTask,
+  _fetchBackendReadinessForServe,
   _retryDownload,
   _nextAvailablePort,
 });

@@ -277,6 +277,7 @@ def _bash_squote(v: str) -> str:
 # Allow-list of binaries permitted as the leading token of `req.cmd` for /api/model/serve.
 # Anything else is rejected before the cmd is interpolated into a tmux/PowerShell wrapper.
 _SERVE_CMD_ALLOWLIST = {
+    "docker",
     "vllm", "llama-server", "llama_server", "llama.cpp", "ollama",
     "python", "python3",
     "sglang", "lmdeploy",
@@ -293,7 +294,6 @@ _SERVE_CMD_ALLOWLIST = {
 _GGUF_PRELUDE_RE = re.compile(
     r'^MODEL_FILE=\$\([^\n]*?\)\s*&&\s*\{[^{}]*\}\s*\|\|\s*\{[^{}]*\}\s*&&\s*'
 )
-
 
 def _check_serve_binary(seg: str) -> None:
     """Validate that a single command segment starts with an allowlisted binary
@@ -340,7 +340,7 @@ def _validate_serve_cmd(v: str | None) -> str | None:
     m = _GGUF_PRELUDE_RE.match(v)
     if m:
         rest = v[m.end():]
-        # rest is `[ENV=…] python3 -m llama_cpp.server … || [ENV=…] llama-server …`
+        # rest is `[ENV=…] llama-server … || [ENV=…] python3 -m llama_cpp.server …`
         for part in rest.split("||"):
             _check_serve_binary(part.strip())
         return v

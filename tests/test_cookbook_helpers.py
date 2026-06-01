@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -13,6 +14,7 @@ from routes.cookbook_helpers import (
     _safe_env_prefix,
     _validate_gpus,
     _validate_repo_id,
+    _validate_serve_cmd,
     _validate_serve_model_id,
     _validate_ssh_port,
 )
@@ -65,6 +67,64 @@ def test_validate_serve_model_id_accepts_cached_local_model_names():
     assert _validate_serve_model_id("DeepSeek-R1-UD-IQ4_XS") == "DeepSeek-R1-UD-IQ4_XS"
     with pytest.raises(HTTPException):
         _validate_serve_model_id("../escape")
+
+def test_validate_serve_cmd_accepts_vllm_docker_launch():
+    cmd = (
+        "docker run --rm --gpus '\"device=0\"' "
+        '-v "${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface" '
+        '--env "HF_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host '
+        "vllm/vllm-openai:cu130-nightly Qwen/Qwen3-0.6B "
+        "--host 0.0.0.0 --port 8000"
+    )
+    assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_validate_serve_cmd_accepts_vllm_modelopt_docker_launch():
+    cmd = (
+        "docker run --rm --gpus '\"device=0,1\"' "
+        '-v "${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface" '
+        '--env "HF_TOKEN=$HF_TOKEN" -p 8000:8000 --ipc=host '
+        "vllm/vllm-openai:cu130-nightly nvidia/Qwen3.6-35B-A3B-NVFP4 "
+        "--host 0.0.0.0 --port 8000 --tensor-parallel-size 2 "
+        "--max-model-len 8192 --quantization modelopt"
+    )
+
+    assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_cookbook_autodetects_nvfp4_modelopt():
+    root = Path(__file__).resolve().parents[1]
+    cookbook_js = (root / "static/js/cookbook.js").read_text(encoding="utf-8")
+    hwfit_js = (root / "static/js/cookbook-hwfit.js").read_text(encoding="utf-8")
+
+    assert "function _detectVllmQuantization" in cookbook_js
+    assert "NVFP4" in cookbook_js
+    assert "modelopt" in cookbook_js
+    assert "_detectVllmQuantization(modelData.name" in hwfit_js
+
+
+def test_validate_serve_cmd_rejects_docker_shell_payload():
+    with pytest.raises(HTTPException):
+        _validate_serve_cmd("docker run alpine echo ok; touch /tmp/pwned")
+
+
+def test_validate_serve_cmd_accepts_llama_native_fallback_launch():
+    cmd = (
+        'MODEL_FILE=$({ find "$HOME/.cache/huggingface" -type f -name "*.gguf"; } | head -1) '
+        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+        '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'CUDA_VISIBLE_DEVICES=0 llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
+        '-ngl 99 -c 8192 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
+        '--spec-type draft-mtp --spec-draft-n-max 3 || '
+        'CUDA_VISIBLE_DEVICES=0 python3 -m llama_cpp.server --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192'
+    )
+    assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_validate_serve_cmd_rejects_arbitrary_if_command():
+    with pytest.raises(HTTPException):
+        _validate_serve_cmd("if true; then llama-server --model ok; fi")
 
 
 def test_local_tooling_path_export_prepends_interpreter_bin():

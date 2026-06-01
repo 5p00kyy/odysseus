@@ -91,6 +91,13 @@ def setup_cookbook_routes() -> APIRouter:
         tail = text[-6000:]
         patterns = [
             (
+                r"(?s)(CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory).*(unquantized_fused_moe_method|W4A16_NVFP4|NVFP4)",
+                "NVFP4 MoE weights appear to be loading without ModelOpt quantization.",
+                [
+                    {"label": "retry with modelopt", "op": "replace", "flag": "--quantization", "value": "modelopt"},
+                ],
+            ),
+            (
                 r"No available memory for the cache blocks|Available KV cache memory:.*-",
                 "No GPU memory left for KV cache after loading model.",
                 [

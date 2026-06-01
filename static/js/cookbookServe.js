@@ -33,6 +33,7 @@ let _getGpuToggleTotal;
 let modelLogo;
 let esc;
 let _launchServeTask;
+let _fetchBackendReadinessForServe;
 let _retryDownload;
 let _nextAvailablePort;
 
@@ -349,10 +350,12 @@ function _rerenderCachedModels() {
       const ss = (_byRepo[repo] && typeof _byRepo[repo] === 'object')
         ? _byRepo[repo]
         : (_lastUsed || (_isLegacyFlat ? _allSs : {}));
+      const _serveStateIsRepoSpecific = !!(_byRepo[repo] && typeof _byRepo[repo] === 'object');
       const detectedBackend = _detectBackend(m).backend;
       const defaultBackend = detectedBackend;
       const savedMatchesBackend = (ss.backend || 'vllm') === detectedBackend;
       const sv = (k, def) => (ss[k] !== undefined && savedMatchesBackend) ? ss[k] : def;
+      const _hasExplicitVllmMode = savedMatchesBackend && _hasOwn(ss, 'launch_mode') && (_serveStateIsRepoSpecific || _isLegacyFlat);
       const defaultTp = defaultBackend === 'llamacpp' ? '1' : sv('tp', '1');
       const detectedGpuIds = _allGpuIds(_getGpuToggleTotal?.());
       const defaultGpus = defaultBackend === 'llamacpp'
@@ -362,6 +365,9 @@ function _rerenderCachedModels() {
           : (_es.gpus || detectedGpuIds));
       const tpOpts = [1,2,4,8].map(n => `<option${defaultTp==String(n)?' selected':''}>${n}</option>`).join('');
       const dtypeOpts = ['auto','float16','bfloat16'].map(d => `<option value="${d}"${sv('dtype','auto')===d?' selected':''}>${d}</option>`).join('');
+      const initialLaunchMode = _hasExplicitVllmMode ? sv('launch_mode','cli') : 'cli';
+      const launchModeOpts = [['cli','CLI'], ['docker','Docker']].map(([v,l]) => `<option value="${v}"${initialLaunchMode===v?' selected':''}>${l}</option>`).join('');
+      const dockerRuntimeOpts = [['nvidia','NVIDIA'], ['rocm','ROCm']].map(([v,l]) => `<option value="${v}"${sv('docker_runtime','nvidia')===v?' selected':''}>${l}</option>`).join('');
       const _l = (name, tip) => `<span>${name}<span class="hwfit-hint" title="${tip}">?</span></span>`;
       // Build save slots
       const _allPresets = _loadPresets();
@@ -389,6 +395,10 @@ function _rerenderCachedModels() {
         : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
       panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('Mode','vLLM launch mode. CLI uses vllm on PATH; Docker uses an official vLLM image on the selected server.')}<select class="hwfit-sf" data-field="launch_mode">${launchModeOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-vllm-docker-mode">${_l('Runtime','Docker GPU runtime for this server')}<select class="hwfit-sf" data-field="docker_runtime">${dockerRuntimeOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm hwfit-vllm-docker-mode">${_l('Image','Docker image for vLLM Docker mode')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="docker_image" value="${esc(sv('docker_image', ''))}" placeholder="vllm/vllm-openai:latest" /></label>`;
+      panelHtml += `<div class="hwfit-backend-vllm hwfit-vllm-readiness-note" style="display:none;align-self:end;max-width:360px;font-size:11px;line-height:1.35;color:var(--fg-muted);"></div>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
@@ -407,7 +417,7 @@ function _rerenderCachedModels() {
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-sglang hwfit-backend-llamacpp">`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('TP','Tensor Parallelism — split model across N GPUs')}<select class="hwfit-sf" data-field="tp">${tpOpts}</select></label>`;
       panelHtml += `<label>${_l('Context','Max tokens per request. Lower = less VRAM')}<input type="text" class="hwfit-sf" data-field="ctx" value="${esc(sv('ctx', '8192'))}" /></label>`;
-      panelHtml += `<label>${_l('GPU','Which GPU to use. Leave empty for default')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
+      panelHtml += `<label class="hwfit-single-gpu-field">${_l('GPU','Which single GPU to use when not using the GPU toggles')}<input type="text" class="hwfit-sf" data-field="gpu_id" value="${esc(sv('gpu_id', ''))}" placeholder="auto" style="width:50px;" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','CPU swap space in GB. Leave empty to omit (removed in newer vLLM)')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 8 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '8'))}" placeholder="8" /></label>`;
@@ -416,12 +426,28 @@ function _rerenderCachedModels() {
       // Row 2b: Diffusers settings
       const diffDtypeOpts = ['bfloat16','float16','float32'].map(d => `<option value="${d}"${sv('diff_dtype','bfloat16')===d?' selected':''}>${d}</option>`).join('');
       const deviceMapOpts = ['balanced','auto','sequential'].map(d => `<option value="${d}"${sv('diff_device_map','balanced')===d?' selected':''}>${d}</option>`).join('');
+      const vllmKvOpts = ['auto','fp8','fp8_e4m3','fp8_e5m2','bfloat16','float16']
+        .map(d => `<option value="${d}"${sv('vllm_kv_cache_dtype','auto')===d?' selected':''}>${d}</option>`).join('');
+      const llamaCacheTypes = ['f16','q8_0','q4_0','q4_1','q5_0','q5_1','bf16','f32','iq4_nl'];
+      const llamaCacheKOpts = llamaCacheTypes.map(d => `<option value="${d}"${sv('llama_cache_k','f16')===d?' selected':''}>${d}</option>`).join('');
+      const llamaCacheVOpts = llamaCacheTypes.map(d => `<option value="${d}"${sv('llama_cache_v','f16')===d?' selected':''}>${d}</option>`).join('');
+      const llamaFlashOpts = ['auto','on','off'].map(d => `<option value="${d}"${sv('llama_flash_attn','auto')===d?' selected':''}>${d}</option>`).join('');
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers">`;
       panelHtml += `<label>Dtype${_h('Precision. bfloat16 recommended for Flux, float16 for SD')} <select class="hwfit-sf" data-field="diff_dtype">${diffDtypeOpts}</select></label>`;
       panelHtml += `<label>Device Map${_h('How to place model on GPUs. balanced = split evenly')} <select class="hwfit-sf" data-field="diff_device_map">${deviceMapOpts}</select></label>`;
       panelHtml += `<label>Steps${_h('Default inference steps. More = better quality, slower')} <input type="text" class="hwfit-sf" data-field="diff_steps" value="${esc(sv('diff_steps', ''))}" placeholder="auto" /></label>`;
       panelHtml += `<label>Width${_h('Default output width')} <input type="text" class="hwfit-sf" data-field="diff_width" value="${esc(sv('diff_width', ''))}" placeholder="1024" /></label>`;
       panelHtml += `<label>Height${_h('Default output height')} <input type="text" class="hwfit-sf" data-field="diff_height" value="${esc(sv('diff_height', ''))}" placeholder="1024" /></label>`;
+      panelHtml += `</div>`;
+      // Row 2c: Memory/cache controls. Keep this narrow: fitting and cache
+      // precision knobs that are commonly useful, while rarer flags stay in
+      // Extra args.
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-vllm hwfit-backend-llamacpp">`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('KV Dtype','vLLM KV cache dtype. auto uses the model dtype; fp8 can reduce VRAM at some quality/perf risk.')}<select class="hwfit-sf" data-field="vllm_kv_cache_dtype">${vllmKvOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('KV Offload GB','Optional vLLM KV cache CPU offload buffer in GiB. Leave blank unless fitting long context requires it.')}<input type="text" class="hwfit-sf" data-field="vllm_kv_offload_gb" value="${esc(sv('vllm_kv_offload_gb', ''))}" placeholder="off" /></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('K Cache','llama.cpp KV cache type for keys. q8_0/q4_0 use less VRAM than f16.')}<select class="hwfit-sf" data-field="llama_cache_k">${llamaCacheKOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('V Cache','llama.cpp KV cache type for values. q8_0/q4_0 use less VRAM than f16.')}<select class="hwfit-sf" data-field="llama_cache_v">${llamaCacheVOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Flash Attn','llama.cpp Flash Attention. auto is safest; on can help speed/memory on supported builds.')}<select class="hwfit-sf" data-field="llama_flash_attn">${llamaFlashOpts}</select></label>`;
       panelHtml += `</div>`;
       // Row 3: Checkboxes (vLLM)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
@@ -433,6 +459,7 @@ function _rerenderCachedModels() {
       // Row 3a: Checkboxes (llama.cpp-only)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-llamacpp">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="unified_mem"${sv('unified_mem',false)?' checked':''} /> Unified Memory${_h('For AMD APUs / Strix Halo: exports GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 so llama.cpp can address the full BIOS VRAM carveout instead of the default ~28 GB cap. No-op on discrete GPUs.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads and a recent llama-server build.')} <span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span></label>`;
       panelHtml += `</div>`;
       // Row 3b: Checkboxes (diffusers)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-diffusers">`;
@@ -501,6 +528,26 @@ function _rerenderCachedModels() {
       if (list) list.scrollTop = 0;
       item.insertAdjacentHTML('beforeend', panelHtml);
       const panel = item.querySelector('.hwfit-serve-panel');
+      let _cmdManuallyEdited = false;
+
+      function _selectedGpuList() {
+        const raw = panel.querySelector('[data-field="gpus"]')?.value || '';
+        return String(raw).split(',').map(s => s.trim()).filter(Boolean);
+      }
+
+      function _syncVllmTpWithSelectedGpus({ notify = false } = {}) {
+        const backend = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
+        if (backend !== 'vllm') return false;
+        const gpus = _selectedGpuList();
+        if (gpus.length <= 1) return false;
+        const tpEl = panel.querySelector('[data-field="tp"]');
+        if (!tpEl || ![2, 4, 8].includes(gpus.length)) return false;
+        const next = String(gpus.length);
+        if (tpEl.value === next || panel._tpManuallyEdited) return false;
+        tpEl.value = next;
+        if (notify) uiModule.showToast(`TP set to ${next} for ${gpus.length} selected GPUs`, 3500);
+        return true;
+      }
 
       // Build command preview
       function updateCmd() {
@@ -511,6 +558,7 @@ function _rerenderCachedModels() {
         });
         const backend = f.backend || 'vllm';
         const serveModel = m.is_local_dir && m.path ? `${m.path}/${repo}` : repo;
+        f.quant = m.quant || m.quantization || '';
         if (backend === 'llamacpp') {
           // For multi-part GGUFs, llama.cpp requires the first split
           // (-00001-of-NNNNN.gguf). Prefer it (sorted, so UD-IQ4_XS/001 comes
@@ -537,17 +585,102 @@ function _rerenderCachedModels() {
         panel._host = f.host || '';
         return cmd;
       }
+      _syncVllmTpWithSelectedGpus();
       updateCmd();
 
       // Show/hide backend-specific sections
       function updateBackendVisibility() {
         const b = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
+        const vllmMode = panel.querySelector('[data-field="launch_mode"]')?.value || 'cli';
         panel.querySelectorAll('[class*="hwfit-backend-"]').forEach(el => {
           const show = el.classList.contains(`hwfit-backend-${b}`);
           el.style.display = show ? '' : 'none';
         });
+        panel.querySelectorAll('.hwfit-vllm-docker-mode').forEach(el => {
+          el.style.display = (b === 'vllm' && vllmMode === 'docker') ? '' : 'none';
+        });
+        panel.querySelectorAll('.hwfit-single-gpu-field').forEach(el => {
+          el.style.display = (b === 'vllm' && vllmMode === 'docker') ? 'none' : '';
+        });
       }
       updateBackendVisibility();
+
+      function _selectedServeTargetForPanel() {
+        let host = panel.querySelector('[data-field="host"]')?.value?.trim() || '';
+        let srv = (_envState.servers || []).find(s => s.host === host) || _selSrv || {};
+        const ssEl = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
+        if (ssEl && ssEl.value != null) {
+          if (ssEl.value === 'local') {
+            host = '';
+            srv = (_envState.servers || []).find(s => !s.host || s.host === 'local') || {};
+          } else {
+            const picked = (_envState.servers || []).find(s => s.host === ssEl.value)
+              || (_envState.servers || [])[parseInt(ssEl.value, 10)];
+            if (picked) {
+              srv = picked;
+              host = picked.host || '';
+            }
+          }
+        }
+        const hostEl = panel.querySelector('[data-field="host"]');
+        if (hostEl) hostEl.value = host;
+        return {
+          host,
+          platform: srv.platform || _es.platform || '',
+          envKind: srv.env || _es.env || '',
+          venvPath: panel.querySelector('[data-field="venv"]')?.value?.trim() || srv.envPath || '',
+        };
+      }
+
+      async function updateVllmReadinessNote() {
+        const note = panel.querySelector('.hwfit-vllm-readiness-note');
+        if (!note) return;
+        const b = panel.querySelector('[data-field="backend"]')?.value || 'vllm';
+        if (b !== 'vllm' || typeof _fetchBackendReadinessForServe !== 'function') {
+          note.style.display = 'none';
+          return;
+        }
+        const { host, platform, envKind, venvPath } = _selectedServeTargetForPanel();
+        note.textContent = '';
+        note.style.display = 'none';
+        try {
+          const readiness = await _fetchBackendReadinessForServe(host, platform, envKind, venvPath);
+          const vllm = readiness?.backends?.vllm?.modes || {};
+          const cliOk = !!vllm?.cli?.ok;
+          const dockerOk = !!vllm?.docker?.ok;
+          const images = vllm?.docker?.details?.images || [];
+          const imageEl = panel.querySelector('[data-field="docker_image"]');
+          const modeEl = panel.querySelector('[data-field="launch_mode"]');
+          if (images[0] && imageEl && !imageEl.value.trim()) {
+            imageEl.value = images[0];
+          }
+          let switched = false;
+          if (!_hasExplicitVllmMode && !cliOk && dockerOk && modeEl?.value === 'cli') {
+            modeEl.value = 'docker';
+            switched = true;
+            updateBackendVisibility();
+          }
+          if (switched || (images[0] && imageEl && !imageEl.dataset.readinessApplied)) {
+            if (imageEl) imageEl.dataset.readinessApplied = '1';
+            updateCmd();
+          }
+          const target = readiness?.server?.host ? readiness.server.host : 'local server';
+          if (cliOk || dockerOk) {
+            note.textContent = '';
+            note.style.display = 'none';
+          } else if (readiness?.tools?.docker?.ok) {
+            note.textContent = `vLLM CLI missing; Docker is available but no vllm/vllm-openai image was found on ${target}.`;
+            note.style.display = '';
+          } else {
+            note.textContent = `vLLM CLI missing and Docker is not ready on ${target}.`;
+            note.style.display = '';
+          }
+        } catch (err) {
+          note.textContent = `Readiness check unavailable: ${err?.message || err}`;
+          note.style.display = '';
+        }
+      }
+      updateVllmReadinessNote();
 
       // Wire save slots
       function _loadSlotIntoPanel(slotIdx) {
@@ -576,6 +709,12 @@ function _rerenderCachedModels() {
             tp: _ex(/--tensor-parallel-size\s+(\d+)/) || '1',
             ctx: _ex(/--max-model-len\s+(\d+)/) || _ex(/--n_ctx\s+(\d+)/) || _ex(/-c\s+(\d+)/) || '8192',
             gpu_mem: _ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
+            vllm_kv_cache_dtype: _ex(/--kv-cache-dtype\s+(\S+)/) || 'auto',
+            vllm_kv_offload_gb: _ex(/--kv-offloading-size\s+(\S+)/) || '',
+            llama_cache_k: _ex(/(?:--cache-type-k|-ctk)\s+(\S+)/) || 'f16',
+            llama_cache_v: _ex(/(?:--cache-type-v|-ctv)\s+(\S+)/) || 'f16',
+            llama_flash_attn: _ex(/(?:--flash-attn|-fa)\s+(on|off|auto)/) || 'auto',
+            llama_spec_tokens: _ex(/--spec-draft-n-max\s+(\d+)/) || '3',
             swap: _ex(/--swap-space\s+(\d+)/) || '',
             dtype: _ex(/--dtype\s+(\w+)/) || 'auto',
             max_seqs: _ex(/--max-num-seqs\s+(\d+)/) || '',
@@ -587,6 +726,7 @@ function _rerenderCachedModels() {
             prefix_cache: cmd.includes('--enable-prefix-caching'),
             auto_tool: cmd.includes('--enable-auto-tool-choice'),
             speculative: cmd.includes('--speculative-config'),
+            llama_speculative_mtp: /--spec-type\s+\S*draft-mtp/.test(cmd),
           };
           const _specMatch = cmd.match(/--speculative-config\s+'?\{[^}]*"method"\s*:\s*"([^"]+)"[^}]*"num_speculative_tokens"\s*:\s*(\d+)/);
           if (_specMatch) {
@@ -617,6 +757,7 @@ function _rerenderCachedModels() {
         const _gf = panel.querySelector('[data-field="gpus"]');
         if (_gf) _gf.value = activeGpus.join(',');
         updateBackendVisibility();
+        _syncVllmTpWithSelectedGpus();
         updateCmd();
         panel.querySelectorAll('.cookbook-slot-btn').forEach(b => b.classList.remove('active'));
         panel.querySelector(`.cookbook-slot-btn[data-slot="${slotIdx}"]`)?.classList.add('active');
@@ -788,6 +929,7 @@ function _rerenderCachedModels() {
           const activeBtns = [...panel.querySelectorAll('.cookbook-gpu-btn.active')];
           const active = activeBtns.map(b => b.dataset.gpu).join(',');
           panel.querySelector('[data-field="gpus"]').value = active;
+          _syncVllmTpWithSelectedGpus({ notify: true });
           // Guard: vLLM/SGLang tensor-parallel only works across IDENTICAL GPUs.
           // If the probe knows the per-GPU models and the selection mixes types,
           // warn — serving across a mixed set will fail or run badly.
@@ -1146,15 +1288,31 @@ function _rerenderCachedModels() {
 
       // Update preview on input change
       panel.querySelectorAll('.hwfit-sf').forEach(el => {
-        el.addEventListener('input', updateCmd);
+        el.addEventListener('input', (e) => {
+          if (e.target.dataset.field === 'tp') panel._tpManuallyEdited = true;
+          updateCmd();
+        });
         el.addEventListener('change', (e) => {
+          if (e.target.dataset.field === 'tp') panel._tpManuallyEdited = true;
           if (e.target.dataset.field === 'backend') {
             const extraEl = panel.querySelector('[data-field="extra"]');
             if (extraEl) extraEl.value = '';
             updateBackendVisibility();
+            _syncVllmTpWithSelectedGpus();
+            updateVllmReadinessNote();
+          }
+          if (e.target.dataset.field === 'launch_mode') {
+            updateBackendVisibility();
+            updateVllmReadinessNote();
           }
           updateCmd();
         });
+      });
+      const _serveServerSelect = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
+      _serveServerSelect?.addEventListener('change', () => {
+        _selectedServeTargetForPanel();
+        updateVllmReadinessNote();
+        if (!_cmdManuallyEdited) updateCmd();
       });
       // Themed +/- buttons next to spec_tokens — step the adjacent number input.
       panel.querySelectorAll('.hwfit-numstep-btn').forEach(btn => {
@@ -1174,7 +1332,6 @@ function _rerenderCachedModels() {
       });
 
       // Track manual edits
-      let _cmdManuallyEdited = false;
       const _cmdTextarea = panel.querySelector('.hwfit-serve-cmd');
       if (_cmdTextarea) _cmdTextarea.addEventListener('input', () => { _cmdManuallyEdited = true; });
 
@@ -1193,6 +1350,7 @@ function _rerenderCachedModels() {
       // Launch button
       panel.querySelector('.hwfit-serve-launch').addEventListener('click', async (ev) => {
         const _launchBtn = ev.currentTarget;
+        if (!_cmdManuallyEdited) await updateVllmReadinessNote();
         if (!_cmdManuallyEdited) updateCmd();
         const launchCmd = _cmdTextarea ? _cmdTextarea.value.trim() : panel._cmd;
         const serveState = {};
@@ -1622,6 +1780,7 @@ export function initServe(shared) {
   modelLogo = shared.modelLogo;
   esc = shared.esc;
   _launchServeTask = shared._launchServeTask;
+  _fetchBackendReadinessForServe = shared._fetchBackendReadinessForServe;
   _retryDownload = shared._retryDownload;
   _nextAvailablePort = shared._nextAvailablePort;
 }
