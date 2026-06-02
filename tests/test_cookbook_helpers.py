@@ -11,6 +11,7 @@ from routes.cookbook_helpers import (
     _append_serve_exit_code_lines,
     _append_serve_preflight_exit_lines,
     _local_tooling_path_export,
+    _normalize_llama_server_fit,
     _safe_env_prefix,
     _validate_gpus,
     _validate_repo_id,
@@ -115,12 +116,92 @@ def test_validate_serve_cmd_accepts_llama_native_fallback_launch():
         '|| { echo "ERROR: No GGUF found"; exit 1; } && '
         'if command -v llama-server >/dev/null 2>&1; then '
         'CUDA_VISIBLE_DEVICES=0 llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
-        '-ngl 99 -c 8192 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
+        '-ngl 99 -c 8192 --fit off --no-warmup --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on '
+        '--split-mode tensor --tensor-split 50,50 --parallel 1 --batch-size 2048 --ubatch-size 512 '
         '--spec-type draft-mtp --spec-draft-n-max 3; else '
         'CUDA_VISIBLE_DEVICES=0 python3 -m llama_cpp.server --model "$MODEL_FILE" '
         '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
     )
     assert _validate_serve_cmd(cmd) == cmd
+
+
+def test_normalize_llama_native_fallback_defaults_fit_off():
+    old_cmd = (
+        'MODEL_FILE=$({ find "$HOME/.cache/huggingface" -type f -name "*.gguf"; } | head -1) '
+        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+        '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'if command -v llama-server >/dev/null 2>&1; then '
+        'CUDA_VISIBLE_DEVICES=0 llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
+        '-ngl 99 -c 8192; else '
+        'CUDA_VISIBLE_DEVICES=0 python3 -m llama_cpp.server --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
+    )
+
+    normalized = _normalize_llama_server_fit(_validate_serve_cmd(old_cmd))
+
+    assert "if command -v llama-server >/dev/null 2>&1; then" in normalized
+    assert 'llama-server --parallel 1 --fit off --model "$MODEL_FILE"' in normalized
+    assert "--no-warmup" not in normalized
+    assert "python3 -m llama_cpp.server --fit off" not in normalized
+    assert "python3 -m llama_cpp.server --parallel 1" not in normalized
+    assert "python3 -m llama_cpp.server --no-mmap" not in normalized
+
+
+def test_normalize_llama_native_fallback_preserves_explicit_fit_and_parallel():
+    cmd = (
+        'MODEL_FILE=$({ find "$HOME/.cache/huggingface" -type f -name "*.gguf"; } | head -1) '
+        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+        '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'if command -v llama-server >/dev/null 2>&1; then '
+        'llama-server --fit on --parallel 4 --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
+        '-ngl 99 -c 8192; else '
+        'python3 -m llama_cpp.server --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
+    )
+
+    normalized = _normalize_llama_server_fit(_validate_serve_cmd(cmd))
+
+    assert "llama-server --fit on --parallel 4" in normalized
+    assert "--no-warmup" not in normalized
+    assert "--fit off" not in normalized
+    assert "--parallel 1" not in normalized
+
+
+def test_normalize_llama_native_fallback_preserves_default_layer_mode_for_tensor_split():
+    old_cmd = (
+        'MODEL_FILE=$(printf %s "/models/model.gguf") '
+        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+        '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'if command -v llama-server >/dev/null 2>&1; then '
+        'llama-server --model "$MODEL_FILE" --host 0.0.0.0 --port 8000 '
+        '-ngl 99 -c 8192 --tensor-split 50,50; else '
+        'python3 -m llama_cpp.server --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
+    )
+
+    normalized = _normalize_llama_server_fit(_validate_serve_cmd(old_cmd))
+
+    assert 'llama-server --parallel 1 --fit off --model "$MODEL_FILE"' in normalized
+    assert "--no-warmup" not in normalized
+    assert "--split-mode tensor" not in normalized
+    assert "--tensor-split 50,50" in normalized
+
+
+def test_normalize_llama_native_fallback_preserves_explicit_unified_memory_no_mmap_and_warmup():
+    cmd = (
+        'MODEL_FILE=$(printf %s "/models/model.gguf") '
+        '&& { [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; } '
+        '|| { echo "ERROR: No GGUF found"; exit 1; } && '
+        'if command -v llama-server >/dev/null 2>&1; then '
+        'GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 llama-server --no-mmap --no-warmup --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 -ngl 99 -c 8192; else '
+        'python3 -m llama_cpp.server --model "$MODEL_FILE" '
+        '--host 0.0.0.0 --port 8000 --n_gpu_layers 99 --n_ctx 8192; fi'
+    )
+
+    normalized = _normalize_llama_server_fit(_validate_serve_cmd(cmd))
+
+    assert "GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 llama-server --parallel 1 --fit off --no-mmap --no-warmup" in normalized
 
 
 def test_validate_serve_cmd_rejects_arbitrary_if_command():

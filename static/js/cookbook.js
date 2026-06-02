@@ -431,9 +431,33 @@ export function _buildServeCmd(f, modelName, backend) {
     // shape here; diagnosis prioritizes native server errors before fallback
     // package errors so useful failures stay visible.
     const _llamaMemArgs = [];
+    const _llamaNum = (v) => {
+      const s = String(v || '').trim();
+      return /^\d+$/.test(s) ? s : '';
+    };
+    const _llamaCsv = (v) => {
+      const s = String(v || '').replace(/\s+/g, '');
+      return /^\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)*$/.test(s) ? s : '';
+    };
+    const _llamaFit = (f.llama_fit || 'off').trim();
+    if (['on', 'off'].includes(_llamaFit)) _llamaMemArgs.push(`--fit ${_llamaFit}`);
+    if (f.llama_no_mmap) _llamaMemArgs.push('--no-mmap');
+    if (f.llama_no_warmup) _llamaMemArgs.push('--no-warmup');
     if (f.llama_cache_k && f.llama_cache_k !== 'f16') _llamaMemArgs.push(`--cache-type-k ${f.llama_cache_k}`);
     if (f.llama_cache_v && f.llama_cache_v !== 'f16') _llamaMemArgs.push(`--cache-type-v ${f.llama_cache_v}`);
     if (f.llama_flash_attn && f.llama_flash_attn !== 'auto') _llamaMemArgs.push(`--flash-attn ${f.llama_flash_attn}`);
+    const _llamaTensorSplit = _llamaCsv(f.llama_tensor_split);
+    const _llamaSplitMode = String(f.llama_split_mode || 'layer').trim();
+    if (['none', 'layer', 'row', 'tensor'].includes(_llamaSplitMode)) _llamaMemArgs.push(`--split-mode ${_llamaSplitMode}`);
+    if (_llamaTensorSplit) _llamaMemArgs.push(`--tensor-split ${_llamaTensorSplit}`);
+    const _llamaMainGpu = _llamaNum(f.llama_main_gpu);
+    if (_llamaMainGpu) _llamaMemArgs.push(`--main-gpu ${_llamaMainGpu}`);
+    const _llamaParallel = _llamaNum(f.llama_parallel || '1');
+    if (_llamaParallel) _llamaMemArgs.push(`--parallel ${_llamaParallel}`);
+    const _llamaBatch = _llamaNum(f.llama_batch_size);
+    if (_llamaBatch) _llamaMemArgs.push(`--batch-size ${_llamaBatch}`);
+    const _llamaUBatch = _llamaNum(f.llama_ubatch_size);
+    if (_llamaUBatch) _llamaMemArgs.push(`--ubatch-size ${_llamaUBatch}`);
     const _llamaMemArgStr = _llamaMemArgs.length ? ` ${_llamaMemArgs.join(' ')}` : '';
     const _llamaSpecArgs = [];
     if (f.llama_speculative_mtp) {

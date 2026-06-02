@@ -1076,6 +1076,13 @@ function _parseServeCmdToFields(cmd) {
     llama_cache_k: ex(/(?:--cache-type-k|-ctk)\s+(\S+)/) || 'f16',
     llama_cache_v: ex(/(?:--cache-type-v|-ctv)\s+(\S+)/) || 'f16',
     llama_flash_attn: ex(/(?:--flash-attn|-fa)\s+(on|off|auto)/) || 'auto',
+    llama_fit: ex(/(?:--fit|-fit)\s+(on|off)/) || 'off',
+    llama_split_mode: ex(/(?:--split-mode|-sm)\s+(none|layer|row|tensor)/) || 'layer',
+    llama_tensor_split: ex(/(?:--tensor-split|-ts)\s+([0-9.,]+)/) || '',
+    llama_main_gpu: ex(/(?:--main-gpu|-mg)\s+(\d+)/) || '',
+    llama_parallel: ex(/(?:--parallel|-np)\s+(\d+)/) || '1',
+    llama_batch_size: ex(/(?:--batch-size|-b)\s+(\d+)/) || '',
+    llama_ubatch_size: ex(/(?:--ubatch-size|-ub)\s+(\d+)/) || '',
     llama_speculative_mtp: /--spec-type\s+\S*draft-mtp/.test(cmd),
     llama_spec_tokens: ex(/--spec-draft-n-max\s+(\d+)/) || '3',
     swap: ex(/--swap-space\s+(\d+)/) || '',
@@ -1086,6 +1093,9 @@ function _parseServeCmdToFields(cmd) {
     trust_remote: cmd.includes('--trust-remote-code'),
     prefix_cache: cmd.includes('--enable-prefix-caching'),
     auto_tool: cmd.includes('--enable-auto-tool-choice'),
+    unified_mem: /GGML_CUDA_ENABLE_UNIFIED_MEMORY=1/.test(cmd),
+    llama_no_mmap: /--no-mmap\b/.test(cmd),
+    llama_no_warmup: /--no-warmup\b/.test(cmd),
     speculative: cmd.includes('--speculative-config'),
   };
   const spec = cmd.match(/--speculative-config\s+'?\{[^}]*"method"\s*:\s*"([^"]+)"[^}]*"num_speculative_tokens"\s*:\s*(\d+)/);

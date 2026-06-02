@@ -497,6 +497,8 @@ function _rerenderCachedModels() {
       const llamaCacheKOpts = llamaCacheTypes.map(d => `<option value="${d}"${sv('llama_cache_k','f16')===d?' selected':''}>${d}</option>`).join('');
       const llamaCacheVOpts = llamaCacheTypes.map(d => `<option value="${d}"${sv('llama_cache_v','f16')===d?' selected':''}>${d}</option>`).join('');
       const llamaFlashOpts = ['auto','on','off'].map(d => `<option value="${d}"${sv('llama_flash_attn','auto')===d?' selected':''}>${d}</option>`).join('');
+      const llamaFitOpts = ['off','on'].map(d => `<option value="${d}"${sv('llama_fit','off')===d?' selected':''}>${d}</option>`).join('');
+      const llamaSplitModeOpts = ['layer','tensor','row','none'].map(d => `<option value="${d}"${sv('llama_split_mode','layer')===d?' selected':''}>${d}</option>`).join('');
       panelHtml += `<div class="hwfit-serve-row hwfit-backend-diffusers">`;
       panelHtml += `<label>Dtype${_h('Precision. bfloat16 recommended for Flux, float16 for SD')} <select class="hwfit-sf" data-field="diff_dtype">${diffDtypeOpts}</select></label>`;
       panelHtml += `<label>Device Map${_h('How to place model on GPUs. balanced = split evenly')} <select class="hwfit-sf" data-field="diff_device_map">${deviceMapOpts}</select></label>`;
@@ -513,6 +515,18 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-llamacpp">${_l('K Cache','llama.cpp KV cache type for keys. q8_0/q4_0 use less VRAM than f16.')}<select class="hwfit-sf" data-field="llama_cache_k">${llamaCacheKOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-llamacpp">${_l('V Cache','llama.cpp KV cache type for values. q8_0/q4_0 use less VRAM than f16.')}<select class="hwfit-sf" data-field="llama_cache_v">${llamaCacheVOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Flash Attn','llama.cpp Flash Attention. auto is safest; on can help speed/memory on supported builds.')}<select class="hwfit-sf" data-field="llama_flash_attn">${llamaFlashOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Fit Params','llama.cpp memory auto-fit. Off keeps explicit Cookbook serve settings stable; on lets llama.cpp adjust unset args.')}<select class="hwfit-sf" data-field="llama_fit">${llamaFitOpts}</select></label>`;
+      panelHtml += `</div>`;
+      // Row 2d: llama.cpp placement/runtime controls. These reproduce common
+      // multi-GPU llama-server preset shapes without turning Cookbook into a
+      // full preset editor.
+      panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Split Mode','llama.cpp GPU placement. layer is default; tensor splits weights and KV across GPUs.')}<select class="hwfit-sf" data-field="llama_split_mode">${llamaSplitModeOpts}</select></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Tensor Split','GPU proportions for llama.cpp, e.g. 50,50 across two visible GPUs. Leave blank for auto.')}<input type="text" class="hwfit-sf" data-field="llama_tensor_split" value="${esc(sv('llama_tensor_split', ''))}" placeholder="50,50" /></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Main GPU','llama.cpp --main-gpu index inside the visible GPU set. Mostly useful for split mode none/row.')}<input type="text" class="hwfit-sf" data-field="llama_main_gpu" value="${esc(sv('llama_main_gpu', ''))}" placeholder="auto" /></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Parallel','llama.cpp parallel slots. 1 matches single-lane presets; auto can increase memory use.')}<input type="text" class="hwfit-sf" data-field="llama_parallel" value="${esc(sv('llama_parallel', '1'))}" placeholder="1" /></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('Batch','llama.cpp prompt batch size. Leave blank for llama.cpp default.')}<input type="text" class="hwfit-sf" data-field="llama_batch_size" value="${esc(sv('llama_batch_size', ''))}" placeholder="2048" /></label>`;
+      panelHtml += `<label class="hwfit-backend-llamacpp">${_l('UBatch','llama.cpp physical micro-batch size. Leave blank for llama.cpp default.')}<input type="text" class="hwfit-sf" data-field="llama_ubatch_size" value="${esc(sv('llama_ubatch_size', ''))}" placeholder="512" /></label>`;
       panelHtml += `</div>`;
       // Row 3: Checkboxes (vLLM)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
@@ -523,7 +537,9 @@ function _rerenderCachedModels() {
       panelHtml += `</div>`;
       // Row 3a: Checkboxes (llama.cpp-only)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-llamacpp">`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="unified_mem"${sv('unified_mem',false)?' checked':''} /> Unified Memory${_h('For AMD APUs / Strix Halo: exports GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 so llama.cpp can address the full BIOS VRAM carveout instead of the default ~28 GB cap. No-op on discrete GPUs.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="unified_mem"${sv('unified_mem',false)?' checked':''} /> Unified Memory${_h('Exports GGML_CUDA_ENABLE_UNIFIED_MEMORY=1 for llama.cpp. Useful for APUs or CUDA runs that deliberately allow host-memory spillover. Leave off unless needed.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_mmap"${sv('llama_no_mmap',false)?' checked':''} /> No mmap${_h('Adds --no-mmap for native llama-server. Useful for some high-context/local-storage setups, but not a universal default.')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="llama_no_warmup"${sv('llama_no_warmup',false)?' checked':''} /> Skip warmup${_h('Adds --no-warmup. Can reduce startup memory spikes for tight launches, but llama.cpp defaults to warming up.')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="llama_speculative_mtp"${sv('llama_speculative_mtp',false)?' checked':''} /> MTP Spec${_h('llama.cpp native MTP speculative decoding: --spec-type draft-mtp. Requires a GGUF with MTP heads and a recent llama-server build.')} <span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="llama_spec_tokens" value="${esc(sv('llama_spec_tokens', '3'))}" min="1" max="10" title="--spec-draft-n-max" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span></label>`;
       panelHtml += `</div>`;
       // Row 3b: Checkboxes (diffusers)
@@ -783,6 +799,13 @@ function _rerenderCachedModels() {
             llama_cache_k: _ex(/(?:--cache-type-k|-ctk)\s+(\S+)/) || 'f16',
             llama_cache_v: _ex(/(?:--cache-type-v|-ctv)\s+(\S+)/) || 'f16',
             llama_flash_attn: _ex(/(?:--flash-attn|-fa)\s+(on|off|auto)/) || 'auto',
+            llama_fit: _ex(/(?:--fit|-fit)\s+(on|off)/) || 'off',
+            llama_split_mode: _ex(/(?:--split-mode|-sm)\s+(none|layer|row|tensor)/) || 'layer',
+            llama_tensor_split: _ex(/(?:--tensor-split|-ts)\s+([0-9.,]+)/) || '',
+            llama_main_gpu: _ex(/(?:--main-gpu|-mg)\s+(\d+)/) || '',
+            llama_parallel: _ex(/(?:--parallel|-np)\s+(\d+)/) || '1',
+            llama_batch_size: _ex(/(?:--batch-size|-b)\s+(\d+)/) || '',
+            llama_ubatch_size: _ex(/(?:--ubatch-size|-ub)\s+(\d+)/) || '',
             llama_spec_tokens: _ex(/--spec-draft-n-max\s+(\d+)/) || '3',
             swap: _ex(/--swap-space\s+(\d+)/) || '',
             dtype: _ex(/--dtype\s+(\w+)/) || 'auto',
@@ -795,6 +818,9 @@ function _rerenderCachedModels() {
             prefix_cache: cmd.includes('--enable-prefix-caching'),
             auto_tool: cmd.includes('--enable-auto-tool-choice'),
             speculative: cmd.includes('--speculative-config'),
+            unified_mem: /GGML_CUDA_ENABLE_UNIFIED_MEMORY=1/.test(cmd),
+            llama_no_mmap: /--no-mmap\b/.test(cmd),
+            llama_no_warmup: /--no-warmup\b/.test(cmd),
             llama_speculative_mtp: /--spec-type\s+\S*draft-mtp/.test(cmd),
           };
           const _specMatch = cmd.match(/--speculative-config\s+'?\{[^}]*"method"\s*:\s*"([^"]+)"[^}]*"num_speculative_tokens"\s*:\s*(\d+)/);

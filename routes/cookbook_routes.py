@@ -35,7 +35,7 @@ from routes.cookbook_helpers import (
     _SSH_PORT_RE, _REMOTE_HOST_RE, _SESSION_ID_RE,
     _validate_repo_id, _validate_serve_model_id, _validate_include, _validate_remote_host, _validate_token,
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
-    _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
+    _ps_squote, _bash_squote, _validate_serve_cmd, _normalize_llama_server_fit, _parse_serve_phase,
     _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
     _append_serve_exit_code_lines, _cached_model_scan_script,
     ModelDownloadRequest, ServeRequest,
@@ -808,7 +808,7 @@ def setup_cookbook_routes() -> APIRouter:
         # `_validate_serve_cmd` returns None for empty input; coerce to "" so the
         # many downstream `"engine" in req.cmd` membership checks can't hit
         # `TypeError: argument of type 'NoneType'` (a 500 instead of a clean 400).
-        req.cmd = _validate_serve_cmd(req.cmd) or ""
+        req.cmd = _normalize_llama_server_fit(_validate_serve_cmd(req.cmd)) or ""
         is_pip_install = bool(req.cmd and "pip install" in req.cmd)
         if is_pip_install:
             # PEP-508-style package spec — letters, digits, `.-_` for the

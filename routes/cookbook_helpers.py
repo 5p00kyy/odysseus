@@ -360,6 +360,34 @@ def _check_llama_cpp_conditional_fallback(rest: str) -> bool:
     return True
 
 
+_LLAMA_NATIVE_CMD_RE = re.compile(r"(?<!command -v )(?<![\w./-])(llama-server|llama_server|llama\.cpp)\b")
+_LLAMA_FIT_ARG_RE = re.compile(r"(?<!\S)(?:--fit|-fit)(?:=|\s+)(?:on|off)\b")
+_LLAMA_PARALLEL_ARG_RE = re.compile(r"(?<!\S)(?:--parallel|-np)(?:=|\s+)\d+\b")
+_LLAMA_SPLIT_MODE_ARG_RE = re.compile(r"(?<!\S)(?:--split-mode|-sm)(?:=|\s+)(?:none|layer|row|tensor)\b")
+_LLAMA_TENSOR_SPLIT_ARG_RE = re.compile(r"(?<!\S)(?:--tensor-split|-ts)(?:=|\s+)\d+(?:\.\d+)?(?:,\d+(?:\.\d+)?)*\b")
+
+
+def _normalize_llama_server_fit(v: str | None) -> str | None:
+    """Default native llama.cpp serve commands to stable memory settings.
+
+    New UI commands include this explicitly. This backend guard keeps old saved
+    presets or stale browser tabs from re-enabling llama.cpp's default autofit
+    path or auto parallel slots, while preserving deliberate explicit values.
+    Omitted split mode is left as llama.cpp's default layer mode.
+    """
+    if not v or "llama-server" not in v and "llama_server" not in v and "llama.cpp" not in v:
+        return v
+    out = v
+    defaults = []
+    if not _LLAMA_PARALLEL_ARG_RE.search(out):
+        defaults.append("--parallel 1")
+    if not _LLAMA_FIT_ARG_RE.search(out):
+        defaults.append("--fit off")
+    if defaults:
+        out = _LLAMA_NATIVE_CMD_RE.sub(r"\1 " + " ".join(defaults), out, count=1)
+    return out
+
+
 def _validate_serve_cmd(v: str | None) -> str | None:
     """Reject serve commands that aren't in the allowlist or contain shell metachars.
 
