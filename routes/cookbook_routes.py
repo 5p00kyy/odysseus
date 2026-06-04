@@ -141,6 +141,15 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "update vLLM, Transformers, and kernels on this server", "op": "dependency", "package": "vllm transformers kernels"}],
             ),
             (
+                r"flashinfer.*(?:fp4|cutlass|gemm)|fp4_gemm_cutlass|cutlass.*(?:fp4|sm120)|\bnvcc\b.*flashinfer|\bcicc\b",
+                "vLLM is compiling FlashInfer/CUTLASS FP4 kernels during startup. This can consume a lot of RAM and make the server look hung on Blackwell/NVFP4 hosts.",
+                [
+                    {"label": "wait for kernel compilation or prewarm once in a pinned runtime", "op": "manual"},
+                    {"label": "retry after freeing RAM/swap and GPU memory", "op": "manual"},
+                    {"label": "use a Docker/runtime profile with prebuilt-compatible vLLM/CUDA versions", "op": "manual"},
+                ],
+            ),
+            (
                 r"Address already in use|bind.*address.*in use",
                 "Port is already in use.",
                 [{"label": "retry on port 8001", "op": "replace", "flag": "--port", "value": "8001"}],
@@ -835,6 +844,47 @@ def setup_cookbook_routes() -> APIRouter:
 
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
         display_name = short_name or "Local model"
+        pinned_models = []
+        try:
+            parts = shlex.split(req.cmd)
+        except Exception:
+            parts = req.cmd.split()
+        i = 0
+        while i < len(parts):
+            part = parts[i]
+            if part == "--served-model-name":
+                j = i + 1
+                while j < len(parts) and not parts[j].startswith("-"):
+                    if parts[j] not in pinned_models:
+                        pinned_models.append(parts[j])
+                    j += 1
+                i = j
+                continue
+            if part.startswith("--served-model-name="):
+                name = part.split("=", 1)[1].strip()
+                if name and name not in pinned_models:
+                    pinned_models.append(name)
+            i += 1
+
+        def _merge_pinned(existing_raw: str | None) -> str | None:
+            merged = []
+            if existing_raw:
+                try:
+                    current = json.loads(existing_raw)
+                    if isinstance(current, list):
+                        for item in current:
+                            val = str(item).strip()
+                            if val and val not in merged:
+                                merged.append(val)
+                except Exception:
+                    for item in re.split(r"[\n,]", existing_raw):
+                        val = item.strip()
+                        if val and val not in merged:
+                            merged.append(val)
+            for item in pinned_models:
+                if item and item not in merged:
+                    merged.append(item)
+            return json.dumps(merged) if merged else None
 
         # If the serve command opts models into OpenAI tool-calling, record it so
         # agent_loop trusts emitted tool_calls instead of the name heuristic.
@@ -850,6 +900,8 @@ def setup_cookbook_routes() -> APIRouter:
                 existing.name = display_name
                 if supports_tools is not None:
                     existing.supports_tools = supports_tools
+                if pinned_models:
+                    existing.pinned_models = _merge_pinned(existing.pinned_models)
                 db.commit()
                 logger.info(f"Updated existing local model endpoint: {base_url}")
                 return existing.id
@@ -863,6 +915,7 @@ def setup_cookbook_routes() -> APIRouter:
                 is_enabled=True,
                 model_type="llm",
                 supports_tools=supports_tools,
+                pinned_models=_merge_pinned(None),
             )
             db.add(ep)
             db.commit()
@@ -1130,6 +1183,15 @@ def setup_cookbook_routes() -> APIRouter:
                 # there via --user and the non-login serve shell otherwise can't
                 # find the `vllm` CLI ("command not found"). Mirrors llama.cpp above.
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
+                if re.search(r"(nvfp4|modelopt|fp4|flashinfer)", req.cmd, re.I):
+                    # Raw vLLM may JIT-build FlashInfer/CUTLASS FP4 kernels the
+                    # first time a Blackwell/NVFP4 model starts. Keep that from
+                    # fanning out into many nvcc/cicc jobs on memory-constrained
+                    # prosumer boxes; users can override these env vars manually.
+                    runner_lines.append('export MAX_JOBS="${MAX_JOBS:-1}"')
+                    runner_lines.append('export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"')
+                    runner_lines.append('export NINJAFLAGS="${NINJAFLAGS:--j1}"')
+                    runner_lines.append('echo "[odysseus] FP4/modelopt vLLM launch detected; limiting kernel-build parallelism (MAX_JOBS=${MAX_JOBS}, CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL})."')
                 runner_lines.append('if ! command -v vllm &>/dev/null; then')
                 runner_lines.append('  echo "ERROR: vLLM is not installed."')
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')

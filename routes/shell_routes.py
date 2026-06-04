@@ -177,6 +177,7 @@ def _package_status_note(name: str, probe: dict) -> str:
     binaries = probe.get("binaries") if isinstance(probe.get("binaries"), dict) else {}
     modules = probe.get("modules") if isinstance(probe.get("modules"), dict) else {}
     dists = probe.get("dists") if isinstance(probe.get("dists"), dict) else {}
+    python = probe.get("python") if isinstance(probe.get("python"), dict) else {}
     module = modules.get(name) if isinstance(modules.get(name), dict) else {}
     locations = module.get("locations") or []
     if name == "vllm":
@@ -184,6 +185,8 @@ def _package_status_note(name: str, probe: dict) -> str:
             parts = [f"vLLM CLI: {binaries['vllm']}"]
             if dists.get("vllm"):
                 parts.append(f"python package: vllm {dists['vllm']}")
+            if python.get("version"):
+                parts.append(f"python {python['version']}")
             return "; ".join(parts)
         if module.get("found") and not dists.get("vllm"):
             loc = locations[0] if locations else module.get("origin") or "unknown path"
@@ -269,6 +272,7 @@ import json
 import os
 import shutil
 import site
+import sys
 
 names=[{names_lit}]
 dist_names={{
@@ -327,7 +331,7 @@ def probe(n):
         mods['torch'] = mod_status('torch')
     dists = dist_status(dist_names.get(n, [n]))
     bins = {{b: shutil.which(b) for b in bin_names.get(n, [])}}
-    return {{'modules': mods, 'dists': dists, 'binaries': bins}}
+    return {{'modules': mods, 'dists': dists, 'binaries': bins, 'python': {{'version': sys.version.split()[0], 'executable': sys.executable}}}}
 
 print(json.dumps({{n: probe(n) for n in names}}))
 """
@@ -1003,6 +1007,7 @@ def setup_shell_routes() -> APIRouter:
                     probe = {
                         "binaries": {"vllm": _vllm_cli},
                         "dists": {"vllm": _vllm_version} if _vllm_version else {},
+                        "python": {"version": sys.version.split()[0], "executable": sys.executable},
                     }
                     pkg["status_note"] = _package_status_note("vllm", probe)
             else:

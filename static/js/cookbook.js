@@ -182,7 +182,34 @@ export function _isMetal() {
 /** Detect model-specific vLLM optimizations */
 function _detectModelOptimizations(modelName) {
   const n = (modelName || '').toLowerCase();
-  const opts = { envVars: [], flags: [], tips: [] };
+  const opts = { envVars: [], flags: [], tips: [], defaults: {}, vllmFlags: [] };
+  const isQwen35Family = /qwen3[._-]?(?:5|6)|qwen35|qwen36|qwen3_5/.test(n);
+  const isModelOptNvfp4 = /\bnvfp4\b|\bmodelopt\b/.test(n);
+  const hasMtpHead = /\bmtp\b|multi-token|speculative-decoding/.test(n);
+  const addOptFlag = (flag) => {
+    const key = String(flag || '').trim().split(/\s+/)[0];
+    if (key && !opts.vllmFlags.some(f => String(f).trim().split(/\s+/)[0] === key)) {
+      opts.vllmFlags.push(flag);
+    }
+  };
+
+  if (isModelOptNvfp4) {
+    addOptFlag('--quantization modelopt');
+    opts.tips.push('NVFP4/modelopt checkpoint: add --quantization modelopt. Use fp8 KV cache or lower batched tokens only when memory pressure requires it.');
+  }
+
+  if (isQwen35Family) {
+    opts.defaults.trust_remote = true;
+    opts.defaults.reasoning_parser = true;
+    addOptFlag('--language-model-only');
+    addOptFlag('--generation-config vllm');
+    if (!opts.flags.some(f => f.includes('--reasoning-parser'))) opts.flags.push('--reasoning-parser qwen3');
+    opts.tips.push('Qwen3.5/Qwen3.6 text serving: trust remote code, language-model-only, and qwen3 reasoning parser.');
+  }
+
+  if (isQwen35Family && isModelOptNvfp4) {
+    opts.tips.push('Blackwell NVFP4 note: if startup fails in attention/all-reduce kernels, try --attention-backend TRITON_ATTN or --disable-custom-all-reduce as advanced compatibility flags.');
+  }
 
   // Qwen3.5 MoE models
   if (n.includes('qwen3.5') || n.includes('qwen3-') && (n.includes('a10b') || n.includes('a22b') || n.includes('a3b'))) {
@@ -205,8 +232,10 @@ function _detectModelOptimizations(modelName) {
   // opts.spec.{method,tokens} seed the UI dropdown/input; the actual flag is
   // assembled by the command builder so the user can edit before launching.
   let specDefault = null;
-  if (n.includes('qwen3-next') || (n.includes('qwen3.5') && (n.includes('a10b') || n.includes('a22b')))) {
+  if (n.includes('qwen3-next')) {
     specDefault = { method: 'qwen3_next_mtp', tokens: 2 };
+  } else if (isQwen35Family && hasMtpHead) {
+    specDefault = { method: 'mtp', tokens: 3 };
   } else if (
     (n.includes('deepseek') && (n.includes('v3') || n.includes('v3.1') || n.includes('r1'))) ||
     n.includes('kimi-k2') || n.includes('kimi_k2') ||
@@ -217,6 +246,7 @@ function _detectModelOptimizations(modelName) {
   }
   if (specDefault) {
     opts.spec = specDefault;
+    opts.defaults.speculative = hasMtpHead;
     opts.flags.push(`--speculative-config '{"method":"${specDefault.method}","num_speculative_tokens":${specDefault.tokens}}'`);
     opts.tips.push(`Speculative decoding (${specDefault.method}, ${specDefault.tokens} tokens): ~1.5-2x faster generation`);
   }
@@ -355,13 +385,19 @@ function _buildEnvPrefixWindows() {
 export function _buildServeCmd(f, modelName, backend) {
   let cmd = '';
   if (backend === 'vllm') {
+    const _opts = _detectModelOptimizations(modelName);
+    const _appendVllmFlag = (flag) => {
+      const text = String(flag || '').trim();
+      const key = text.split(/\s+/)[0];
+      if (text && key && !cmd.includes(key)) cmd += ` ${text}`;
+    };
     const gpuId = f.gpu_id?.trim() || '';
     if (gpuId) cmd += `CUDA_VISIBLE_DEVICES=${gpuId} `;
     if (f.moe_env) {
-      const _opts = _detectModelOptimizations(modelName);
       if (_opts.envVars.length) cmd += _opts.envVars.join(' ') + ' ';
     }
     cmd += `vllm serve ${modelName} --host 0.0.0.0 --port ${f.port || '8000'}`;
+    (_opts.vllmFlags || []).forEach(_appendVllmFlag);
     cmd += ` --tensor-parallel-size ${f.tp || '1'}`;
     cmd += ` --max-model-len ${f.ctx || '8192'}`;
     cmd += ` --gpu-memory-utilization ${f.gpu_mem || '0.90'}`;
@@ -370,8 +406,11 @@ export function _buildServeCmd(f, modelName, backend) {
     const _kv = (f.vllm_kv_cache_dtype ?? '').toString().trim();
     if (_kv === 'fp8') cmd += ' --kv-cache-dtype fp8';
     if (f.max_seqs && f.max_seqs.toString().trim()) cmd += ` --max-num-seqs ${f.max_seqs.toString().trim()}`;
+    if (f.max_batched_tokens && /^\d+$/.test(f.max_batched_tokens.toString().trim())) {
+      _appendVllmFlag(`--max-num-batched-tokens ${f.max_batched_tokens.toString().trim()}`);
+    }
     if (f.enforce_eager) cmd += ' --enforce-eager';
-    if (f.trust_remote) cmd += ' --trust-remote-code';
+    if (f.trust_remote) _appendVllmFlag('--trust-remote-code');
     if (f.prefix_cache) cmd += ' --enable-prefix-caching';
     if (f.auto_tool) cmd += ` --enable-auto-tool-choice --tool-call-parser ${_detectToolParser(modelName)}`;
     if (f.expert_parallel) cmd += ' --enable-expert-parallel';

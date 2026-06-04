@@ -222,10 +222,12 @@ class TestPackageProbeStatus:
             "modules": {"vllm": {"found": True, "real_module": True}},
             "dists": {"vllm": "0.8.5"},
             "binaries": {"vllm": "/home/user/venv/bin/vllm"},
+            "python": {"version": "3.12.8", "executable": "/home/user/venv/bin/python"},
         }
 
         assert _package_installed_from_probe("vllm", probe) is True
         assert "python package: vllm 0.8.5" in _package_status_note("vllm", probe)
+        assert "python 3.12.8" in _package_status_note("vllm", probe)
         assert _package_pip_update_status({"name": "vllm", "pip": "vllm"}, probe).available is True
 
     def test_vllm_cli_without_dist_is_external_for_update(self):

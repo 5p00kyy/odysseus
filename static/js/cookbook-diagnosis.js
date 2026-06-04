@@ -334,6 +334,19 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /flashinfer.*(?:fp4|cutlass|gemm)|fp4_gemm_cutlass|cutlass.*(?:fp4|sm120)|\bnvcc\b.*flashinfer|\bcicc\b/i,
+    message: 'vLLM is compiling FlashInfer/CUTLASS FP4 kernels during startup. On Blackwell/NVFP4 hosts this can consume a lot of RAM and make the server look hung before it is ready.',
+    suggestion: 'Suggested action: wait for the first compile to finish if the host is healthy; otherwise stop the serve, free RAM/swap/GPU memory, and retry with a pinned Docker/runtime profile or limited build parallelism.',
+    fixes: [
+      { label: 'Kill vLLM processes', action: (panel) => _runQuickCmd(panel, 'pkill -f vllm') },
+      { label: 'Copy diagnosis bundle', action: (panel) => {
+        const taskEl = panel.closest('.cookbook-task');
+        const task = taskEl ? _loadTasks().find(t => t.sessionId === taskEl.dataset.taskId) : null;
+        _copyText(_diagnosisCopyBundle(task, { message: 'FlashInfer FP4 kernel compile stall' }, panel.textContent || '', 'Use a pinned vLLM/CUDA runtime or retry with limited kernel-build parallelism.'));
+      }},
+    ],
+  },
+  {
     pattern: /torch\.cuda\.is_available\(\).*False|No CUDA runtime/i,
     message: 'vLLM needs a visible CUDA/ROCm GPU.',
     suggestion: 'Suggested action: switch this serve config to llama.cpp for CPU/local serving, or choose a GPU server.',

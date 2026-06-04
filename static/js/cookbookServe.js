@@ -44,7 +44,9 @@ let _cachedAllModels = [];
 function _repoLooksAwqLike(model, repo) {
   const q = String(model?.quant || '').toUpperCase();
   const n = `${repo || ''} ${model?.repo_id || ''} ${model?.name || ''} ${model?.path || ''}`.toLowerCase();
-  return /^AWQ|^GPTQ/.test(q) || q === 'FP8' || /\b(awq|gptq|fp8)\b/i.test(n);
+  return /^AWQ|^GPTQ|^NVFP4/.test(q)
+    || ['FP8', 'FP4', 'MXFP4', 'NF4', 'INT4', 'INT8', 'W4A16', 'W8A8', 'W8A16'].includes(q)
+    || /\b(awq|gptq|fp8|fp4|nvfp4|modelopt|mxfp4|nf4|int4|int8|w4a16|w8a8|w8a16)\b/i.test(n);
 }
 
 function _repoLooksGgufLike(model, repo) {
@@ -58,20 +60,20 @@ function _serveBackendWarning(model, repo, backend, fields = {}) {
   const ggufLike = _repoLooksGgufLike(model, repo);
   if (awqLike && (backend === 'llamacpp' || backend === 'ollama')) {
     return {
-      title: 'AWQ needs vLLM or SGLang',
-      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. llama.cpp and Ollama need GGUF files, so this backend cannot serve it. Choose vLLM/SGLang on a CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama.',
+      title: 'Quantized safetensors need vLLM or SGLang',
+      body: 'This model looks like AWQ/GPTQ/FP8/NVFP4 safetensors. llama.cpp and Ollama need GGUF files, so this backend cannot serve it. Choose vLLM/SGLang on a CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama.',
     };
   }
   if (awqLike && _isMetal() && (backend === 'vllm' || backend === 'sglang')) {
     return {
-      title: 'AWQ is not a unified-memory path',
-      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. AWQ is for vLLM/SGLang on CUDA/ROCm-style GPU servers, not local unified-memory llama.cpp/Ollama serving. For unified memory, download a GGUF model and use llama.cpp/Ollama.',
+      title: 'Quantized safetensors are not a unified-memory path',
+      body: 'This model looks like AWQ/GPTQ/FP8/NVFP4 safetensors. These formats are for vLLM/SGLang on CUDA/ROCm-style GPU servers, not local unified-memory llama.cpp/Ollama serving. For unified memory, download a GGUF model and use llama.cpp/Ollama.',
     };
   }
   if (awqLike && fields.unified_mem) {
     return {
-      title: 'AWQ is not a unified-memory path',
-      body: 'This model looks like AWQ/GPTQ/FP8 safetensors, but unified-memory local serving expects GGUF. Use vLLM/SGLang on a compatible GPU server, or download a GGUF version for llama.cpp/Ollama.',
+      title: 'Quantized safetensors are not a unified-memory path',
+      body: 'This model looks like AWQ/GPTQ/FP8/NVFP4 safetensors, but unified-memory local serving expects GGUF. Use vLLM/SGLang on a compatible GPU server, or download a GGUF version for llama.cpp/Ollama.',
     };
   }
   if (ggufLike && (backend === 'vllm' || backend === 'sglang')) {
@@ -143,13 +145,31 @@ async function _fetchServeRuntimePackage(panel, backend) {
   return { pkg, target };
 }
 
-function _runtimeNoteText(backend, pkg, target) {
+function _versionAtLeast(version, major, minor) {
+  const parts = String(version || '').match(/\d+/g) || [];
+  const a = Number(parts[0] || 0);
+  const b = Number(parts[1] || 0);
+  return a > major || (a === major && b >= minor);
+}
+
+function _runtimeNoteText(backend, pkg, target, modelName = '') {
   const labels = { vllm: 'vLLM', sglang: 'SGLang', llamacpp: 'llama.cpp', diffusers: 'Diffusers' };
   const label = labels[backend] || backend;
   if (!pkg) return `${label} readiness unavailable for ${target.label}.`;
   const note = pkg.status_note || pkg.update_note || '';
   if (pkg.installed) {
-    return note ? `${label} ready on ${target.label}: ${note}` : `${label} ready on ${target.label}.`;
+    let extra = '';
+    if (backend === 'vllm') {
+      const n = String(modelName || '').toLowerCase();
+      const needsModern = /qwen3[._-]?(?:5|6)|qwen35|qwen36|qwen3_5|\bnvfp4\b|\bmodelopt\b/.test(n);
+      const version = pkg?.details?.dists?.vllm || String(note).match(/vllm\s+([0-9][\w.+-]*)/i)?.[1] || '';
+      if (needsModern && version && !_versionAtLeast(version, 0, 21)) {
+        extra = ' Warning: verify this vLLM build has CUDA/Blackwell NVFP4 support; generic older pip builds may JIT-compile kernels or fail at startup.';
+      } else if (needsModern && !version) {
+        extra = ' Warning: vLLM version is unknown; Qwen3.5/Qwen3.6 NVFP4/MTP models need a recent compatible vLLM/CUDA stack.';
+      }
+    }
+    return note ? `${label} ready on ${target.label}: ${note}.${extra}` : `${label} ready on ${target.label}.${extra}`;
   }
   return note ? `${label} missing on ${target.label}: ${note}` : `${label} missing on ${target.label}.`;
 }
@@ -519,6 +539,8 @@ function _rerenderCachedModels() {
         : detectedBackend;
       const savedMatchesBackend = !!ss._forceBackend || (ss.backend || 'vllm') === detectedBackend;
       const sv = (k, def) => (ss[k] !== undefined && savedMatchesBackend) ? ss[k] : def;
+      const _serveOpts = _detectModelOptimizations(repo) || {};
+      const _serveDefaults = _serveOpts.defaults || {};
       const defaultTp = defaultBackend === 'llamacpp' ? '1' : sv('tp', '1');
       const detectedGpuIds = _allGpuIds(_getGpuToggleTotal?.());
       const defaultGpus = defaultBackend === 'llamacpp'
@@ -528,7 +550,8 @@ function _rerenderCachedModels() {
           : (_es.gpus || detectedGpuIds));
       const tpOpts = [1,2,4,8].map(n => `<option${defaultTp==String(n)?' selected':''}>${n}</option>`).join('');
       const dtypeOpts = ['auto','float16','bfloat16'].map(d => `<option value="${d}"${sv('dtype','auto')===d?' selected':''}>${d}</option>`).join('');
-      const vllmKvCacheOpts = ['auto','fp8'].map(d => `<option value="${d}"${sv('vllm_kv_cache_dtype','auto')===d?' selected':''}>${d}</option>`).join('');
+      const vllmKvDefault = _serveDefaults.vllm_kv_cache_dtype || 'auto';
+      const vllmKvCacheOpts = ['auto','fp8'].map(d => `<option value="${d}"${sv('vllm_kv_cache_dtype', vllmKvDefault)===d?' selected':''}>${d}</option>`).join('');
       const _l = (name, tip) => `<span>${name}<span class="hwfit-hint" title="${tip}">?</span></span>`;
       const _ggufChoices = _runnableGgufFiles(m);
       const _savedGguf = String(sv('gguf_file', '') || '');
@@ -611,6 +634,7 @@ function _rerenderCachedModels() {
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('GPU Mem','Fraction of GPU memory (0.0–1.0). Lower if OOM')}<input type="text" class="hwfit-sf" data-field="gpu_mem" value="${esc(sv('gpu_mem', '0.90'))}" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('Swap','CPU swap space in GB. Leave empty to omit (removed in newer vLLM)')}<input type="text" class="hwfit-sf" data-field="swap" value="${esc(sv('swap', ''))}" placeholder="off" /></label>`;
       panelHtml += `<label class="hwfit-backend-vllm hwfit-backend-sglang">${_l('Max Seqs','Maximum concurrent requests. Lower = less memory. Default 4 — prosumer GPUs often OOM on vLLM default 256 during CUDA graph capture.')}<input type="text" class="hwfit-sf" data-field="max_seqs" value="${esc(sv('max_seqs', '4'))}" placeholder="4" /></label>`;
+      panelHtml += `<label class="hwfit-backend-vllm">${_l('Batched Tok','vLLM --max-num-batched-tokens. Lower reduces startup/runtime memory pressure for long-context launches.')}<input type="text" class="hwfit-sf" data-field="max_batched_tokens" value="${esc(sv('max_batched_tokens', _serveDefaults.max_batched_tokens || ''))}" placeholder="auto" /></label>`;
       panelHtml += `<label>${_l('Dtype','Data type for weights. auto picks best for GPU')}<select class="hwfit-sf" data-field="dtype">${dtypeOpts}</select></label>`;
       panelHtml += `<label class="hwfit-backend-vllm">${_l('KV Cache','vLLM --kv-cache-dtype. auto uses the model/runtime default; fp8 reduces KV memory for long context.')}<select class="hwfit-sf" data-field="vllm_kv_cache_dtype" style="height:32px;">${vllmKvCacheOpts}</select></label>`;
       panelHtml += `</div>`;
@@ -627,7 +651,7 @@ function _rerenderCachedModels() {
       // Row 3: Checkboxes (vLLM)
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm hwfit-backend-sglang">`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="enforce_eager"${sv('enforce_eager',false)?' checked':''} /> Enforce Eager${_h('Disable CUDA graphs. Slower but uses less memory')}</label>`;
-      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="trust_remote"${sv('trust_remote',false)?' checked':''} /> Trust Remote Code${_h('Allow model to run custom code from HuggingFace')}</label>`;
+      panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="trust_remote"${sv('trust_remote', !!_serveDefaults.trust_remote)?' checked':''} /> Trust Remote Code${_h('Allow model to run custom code from HuggingFace')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="prefix_cache"${sv('prefix_cache',false)?' checked':''} /> Prefix Caching${_h('Cache shared prompt prefixes across requests')}</label>`;
       panelHtml += `<label class="hwfit-sf-cb hwfit-backend-vllm"><input type="checkbox" class="hwfit-sf" data-field="auto_tool"${sv('auto_tool',false)?' checked':''} /> Auto Tool Choice${_h('Enable function/tool calling for agent mode')}</label>`;
       panelHtml += `</div>`;
@@ -689,10 +713,10 @@ function _rerenderCachedModels() {
       // vLLM backend so the Speculative (MTP) control is ALWAYS reachable —
       // even for models the auto-detector doesn't recognize. Expert-parallel,
       // reasoning-parser and MoE-env still only appear when auto-detected.
-      const _opts2 = _detectModelOptimizations(repo);
+      const _opts2 = _serveOpts;
       panelHtml += `<div class="hwfit-serve-checks hwfit-backend-vllm" style="margin-top:2px;">`;
       if (_opts2.flags.includes('--enable-expert-parallel')) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="expert_parallel" /> Expert Parallel</label>`;
-      if (_opts2.flags.some(f => f.includes('--reasoning-parser'))) { const rp = _opts2.flags.find(f => f.includes('--reasoning-parser')).split(' ')[1]; panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${rp}" /> Reasoning Parser <span class="hwfit-parser-tag">${rp}</span></label>`; }
+      if (_opts2.flags.some(f => f.includes('--reasoning-parser'))) { const rp = _opts2.flags.find(f => f.includes('--reasoning-parser')).split(' ')[1]; panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="reasoning_parser" data-parser="${rp}"${sv('reasoning_parser', !!_serveDefaults.reasoning_parser)?' checked':''} /> Reasoning Parser <span class="hwfit-parser-tag">${rp}</span></label>`; }
       {
         // Speculative decoding (vLLM --speculative-config). Default OFF; the
         // method/token defaults come from auto-detection when available,
@@ -705,7 +729,7 @@ function _rerenderCachedModels() {
         if (!_specMethods.includes(_specMethod)) _specMethods.unshift(_specMethod);
         const _specOpts = _specMethods.map(m =>
           `<option value="${m}"${m === _specMethod ? ' selected' : ''}>${m}</option>`).join('');
-        panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative" /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
+        panelHtml += `<label class="hwfit-sf-cb hwfit-spec-group"><input type="checkbox" class="hwfit-sf" data-field="speculative"${sv('speculative', !!_serveDefaults.speculative)?' checked':''} /> Speculative <select class="hwfit-sf hwfit-spec-method" data-field="spec_method" title="vLLM --speculative-config method">${_specOpts}</select><span class="hwfit-numstep"><button type="button" class="hwfit-numstep-btn" data-step="-1" tabindex="-1" aria-label="Decrease">‹</button><input type="number" class="hwfit-sf hwfit-spec-tokens" data-field="spec_tokens" value="${esc(_specTokens)}" min="1" max="10" title="num_speculative_tokens" /><button type="button" class="hwfit-numstep-btn" data-step="1" tabindex="-1" aria-label="Increase">›</button></span><span class="hwfit-help-chip hwfit-help-chip-inline" title="MTP / speculative decoding is supported on a few model families only — turn it on when the model card explicitly recommends it. On supported models it can boost inference throughput up to ~3×; on unsupported models it will either be ignored or fail to launch." style="margin-left:6px;">?</span></label>`;
       }
       if (_opts2.envVars.length) panelHtml += `<label class="hwfit-sf-cb"><input type="checkbox" class="hwfit-sf" data-field="moe_env" /> MoE Env Vars</label>`;
       panelHtml += `</div>`;
@@ -958,7 +982,7 @@ function _rerenderCachedModels() {
         try {
           const { pkg, target } = await _fetchServeRuntimePackage(panel, backend);
           if (panel._runtimeReadinessSeq !== seq) return;
-          note.textContent = _runtimeNoteText(backend, pkg, target);
+          note.textContent = _runtimeNoteText(backend, pkg, target, repo);
           note.style.color = pkg?.installed ? 'var(--fg-muted)' : 'var(--red)';
         } catch (err) {
           if (panel._runtimeReadinessSeq !== seq) return;
@@ -1005,6 +1029,7 @@ function _rerenderCachedModels() {
             dtype: _ex(/--dtype\s+(\w+)/) || 'auto',
             vllm_kv_cache_dtype: _ex(/--kv-cache-dtype\s+([\w.-]+)/) || 'auto',
             max_seqs: _ex(/--max-num-seqs\s+(\d+)/) || '',
+            max_batched_tokens: _ex(/--max-num-batched-tokens\s+(\d+)/) || '',
             cache_type: _ex(/(?:--cache-type-k|-ctk)\s+(\S+)/) || '',
             llama_fit: _ex(/(?:--fit|-fit)\s+(on|off)/) || '',
             llama_split_mode: _ex(/(?:--split-mode|-sm)\s+(none|layer|row|tensor)/) || '',
@@ -1690,6 +1715,29 @@ function _rerenderCachedModels() {
                 { title: 'No GPU detected', confirmText: 'Launch anyway', cancelText: 'Cancel', danger: true },
               );
               if (!_proceed) return;
+            } else if (['vllm', 'sglang'].includes(serveState.backend)) {
+              const _selectedGpuIds = String(serveState.gpus || '').split(',').map(s => s.trim()).filter(Boolean);
+              const _targetGpus = _selectedGpuIds.length
+                ? _selectedGpuIds.map(id => _probeGpus.find(g => String(g.index) === id)).filter(Boolean)
+                : _probeGpus;
+              const _gpuMemTarget = Number.parseFloat(serveState.gpu_mem || '0.90');
+              const _minFreeFrac = Number.isFinite(_gpuMemTarget) && _gpuMemTarget > 0
+                ? Math.min(_gpuMemTarget, 0.98)
+                : 0.90;
+              const _busy = _targetGpus.filter(g => g.total_mb > 0 && (g.free_mb / g.total_mb) < _minFreeFrac);
+              if (_busy.length) {
+                const _rows = _busy.map(g => {
+                  const used = (g.used_mb / 1024).toFixed(1);
+                  const total = (g.total_mb / 1024).toFixed(1);
+                  const free = (g.free_mb / 1024).toFixed(1);
+                  return `GPU ${g.index} ${g.name || ''}: ${free} GB free (${used}/${total} GB used)`;
+                }).join('\n');
+                const _proceed = await window.styledConfirm(
+                  `Selected GPU memory is already busy on ${_probeHost ? _probeHost : 'this host'}.\n\n${_rows}\n\n${serveState.backend.toUpperCase()} will reserve about ${Math.round(_minFreeFrac * 100)}% of each selected GPU, so this launch may fail before loading the model.\n\nLaunch anyway?`,
+                  { title: 'GPU memory already in use', confirmText: 'Launch anyway', cancelText: 'Cancel', danger: true },
+                );
+                if (!_proceed) return;
+              }
             }
           } catch {
             // Network / probe failure — don't block. Better to let the launch
