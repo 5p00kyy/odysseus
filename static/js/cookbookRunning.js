@@ -21,6 +21,10 @@ function _statusLabel(status, type) {
   return status || '';
 }
 
+function _isTaskRuntimeActive(task) {
+  return ['running', 'ready', 'loading', 'warming', 'starting'].includes(task?.status);
+}
+
 function _downloadBadgeText(progress) {
   const raw = String(progress || '').trim();
   if (!raw) return 'downloading';
@@ -744,10 +748,16 @@ async function _startQueuedDownload(task) {
 // ── Task CRUD ──
 
 function _serveOutputLooksReady(task) {
-  const out = String(task?.output || '');
+  const out = String(task?.output || '').replace(/\s+/g, ' ');
+  const nativeReady = [...out.matchAll(/server is listening on|slot\s+(?:print_timing|launch_slot_|release)\s*:/gi)];
+  if (nativeReady.length) {
+    const exits = [...out.matchAll(/===\s*process exited with code\s+-?\d+|:::EXIT_CODE:::\s*-?\d+/gi)];
+    return !exits.length || exits[exits.length - 1].index < nativeReady[nativeReady.length - 1].index;
+  }
   return !!task?._serveReady
     || /Application startup complete/i.test(out)
     || /Ollama API ready on port\s+\d+/i.test(out)
+
     || /(?:GET|POST)\s+\/[^\s]*\s+HTTP\/[\d.]+"\s*2\d\d/i.test(out);
 }
 
@@ -1076,6 +1086,33 @@ export function _tmuxGracefulKill(task) {
     return `ssh ${_sshPrefix(_getPort(task))}${host} '${_remoteTmuxPrefix()}tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null'`;
   }
   return `tmux send-keys -t ${task.sessionId} C-c 2>/dev/null; sleep 2; tmux kill-session -t ${task.sessionId} 2>/dev/null`;
+}
+
+// Never forget a task merely because a stop request returned successfully.
+async function _stopTaskSessionVerified(task) {
+  if (!task.sessionId) return false;
+  try {
+    const stop = await fetch('/api/shell/exec', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
+    });
+    if (!stop.ok) return false;
+    const result = await stop.json();
+    // Exit 1 can mean the session already finished; SSH/timeout failures cannot.
+    if (![0, 1].includes(result.exit_code)) return false;
+    const probe = await fetch('/api/shell/exec', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
+    });
+    if (!probe.ok) return false;
+    const status = await probe.json();
+    // 0 is still alive, 1 is absent, everything else is unknown (e.g. SSH 255).
+    return status.exit_code === 1;
+  } catch (_) {
+    return false;
+  }
 }
 
 // Force-kill escalation: SIGKILL the tmux pane's owning PID and any children,
@@ -1794,6 +1831,7 @@ function _parseServeCmdToFields(cmd) {
     llama_split_mode: ex(/(?:--split-mode|-sm)\s+(none|layer|row|tensor)/) || '',
     llama_tensor_split: ex(/(?:--tensor-split|-ts)\s+([0-9.,]+)/) || '',
     llama_main_gpu: ex(/(?:--main-gpu|-mg)\s+(\d+)/) || '',
+    llama_mmproj_device: ex(/--mmproj-device\s+(CUDA\d+|none)\b/) || '',
     llama_parallel: ex(/(?:--parallel|-np)\s+(\d+)/) || '',
     llama_batch_size: ex(/(?:--batch-size|-b)\s+(\d+)/) || '',
     llama_ubatch_size: ex(/(?:--ubatch-size|-ub)\s+(\d+)/) || '',
@@ -2042,7 +2080,7 @@ export function _renderRunningTab() {
   // event but the matching clear only ran on modal-open, so the highlight
   // persisted indefinitely after tasks finished in the background.
   try {
-    const _activeTasks = _loadPrunedTasks().filter(t => t.status === 'running' || t.status === 'queued' || t.status === 'error');
+    const _activeTasks = _loadPrunedTasks().filter(t => _isTaskRuntimeActive(t) || t.status === 'queued' || t.status === 'error');
     if (!_activeTasks.length) _clearCookbookNotif();
   } catch {}
 
@@ -2083,13 +2121,13 @@ export function _renderRunningTab() {
 
   const tasks = _loadTasks();
   const hasContent = tasks.length > 0;
-  // Count anything that's really active: explicit 'running'/'queued' status,
+  // Count anything that's really active, including ready model servers,
   // OR a download whose tmux output is still showing live shard progress.
   // Without the output check, a task whose status got stuck at 'done' /
   // 'crashed' (before auto-reconnect catches it) would read as "Running 0"
   // even when the model is actively downloading on the host.
   const activeCount = tasks.filter(t =>
-    t.status === 'running'
+    _isTaskRuntimeActive(t)
     || t.status === 'queued'
     || _downloadOutputLooksActive(t)
   ).length;
@@ -2243,7 +2281,7 @@ export function _renderRunningTab() {
       // every task on this server is still running (nothing finished to
       // clear yet) — the previous behavior looked like the button was dead.
       if (!toRemove.length) {
-        const stillRunning = allTasks.filter(t => _taskServerKey(t) === host && t.status === 'running').length;
+        const stillRunning = allTasks.filter(t => _taskServerKey(t) === host && _isTaskRuntimeActive(t)).length;
         const _msg = stillRunning
           ? `No finished tasks on ${_serverName(host)} — ${stillRunning} still running. Stop them first to clear.`
           : `No finished tasks on ${_serverName(host)}.`;
@@ -2287,7 +2325,7 @@ export function _renderRunningTab() {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();  // don't toggle the section collapse
       const host = btn.dataset.stopServer;
-      const running = _loadTasks().filter(t => _taskServerKey(t) === host && t.status === 'running');
+      const running = _loadTasks().filter(t => _taskServerKey(t) === host && _isTaskRuntimeActive(t));
       if (!running.length) { uiModule.showToast(`Nothing running on ${_serverName(host)}`); return; }
       if (!await window.styledConfirm(`Stop ${running.length} running task${running.length > 1 ? 's' : ''} on ${_serverName(host)}?`, { confirmText: 'Stop all' })) return;
       // Mark every task as user-stopped BEFORE firing the kills so that the
@@ -2878,10 +2916,6 @@ export function _renderRunningTab() {
       el.dataset.status = 'stopped';
       _updateTask(task.sessionId, { _userStopped: true });
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
-      // Drop the model endpoint so the picker stops listing it.
-      if (task.type === 'serve' && task.payload) {
-        _removeEndpointByUrl(_endpointUrlForTask(task, outputText));
-      }
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
       if (ollamaUnload) {
         try {
@@ -2892,14 +2926,16 @@ export function _renderRunningTab() {
           });
         } catch {}
       }
-      // Gracefully stop (C-c, then kill the session) so it's fully down...
-      try {
-        await fetch('/api/shell/exec', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
-        });
-      } catch {}
+      // Keep both the task and endpoint until the remote session is confirmed gone.
+      if (!await _stopTaskSessionVerified(task)) {
+        _updateTask(task.sessionId, { _userStopped: false });
+        uiModule.showToast('Stop could not be verified. The task is still tracked.', 9000);
+        _renderRunningTab();
+        return;
+      }
+      if (task.type === 'serve' && task.payload) {
+        _removeEndpointByUrl(_endpointUrlForTask(task, outputText));
+      }
       // ...then smoothly fade/slide the card out and auto-remove it — no manual
       // ⋮ → Remove needed.
       _animateOutThenRemove(el, task.sessionId);
@@ -2912,7 +2948,6 @@ export function _renderRunningTab() {
     // row disappeared from the UI.
     el.querySelector('.cookbook-task-action-kill').addEventListener('click', async () => {
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
-      const isLive = task.type === 'serve' && ['running', 'ready', 'loading', 'warming', 'starting'].includes(task.status || '');
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
       if (ollamaUnload) {
         try {
@@ -2923,37 +2958,8 @@ export function _renderRunningTab() {
           });
         } catch (_) { /* unload best-effort */ }
       }
-      let killOk = true;
-      try {
-        const r = await fetch('/api/shell/exec', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
-        });
-        if (r.ok) {
-          const out = await r.json();
-          // Don't trust exit_code alone — tmux kill returns 0 even when
-          // there was nothing to kill. Verify the session is actually gone.
-          if (task.sessionId && isLive) {
-            try {
-              const probe = await fetch('/api/shell/exec', {
-                method: 'POST', credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
-              });
-              if (probe.ok) {
-                const pj = await probe.json();
-                // has-session exits 0 when session STILL exists; non-zero = gone.
-                if ((pj.exit_code || 0) === 0) killOk = false;
-              }
-            } catch (_) { /* probe best-effort; trust kill */ }
-          }
-        } else {
-          killOk = false;
-        }
-      } catch (_) { killOk = false; }
-      if (!killOk) {
-        try { uiModule.showToast('Kill failed — session may still be running. Check `tmux ls` on the server.', 'error'); } catch (_) {}
+      if (!await _stopTaskSessionVerified(task)) {
+        try { uiModule.showToast('Kill could not be verified. The task is still tracked.', 9000); } catch (_) {}
         return;  // leave the row so the user can retry
       }
       if (task.type === 'serve' && task.payload) {
@@ -3827,7 +3833,7 @@ async function _checkServeReachability() {
   _serveReachabilityLastAt = now;
   let serveTasks;
   try {
-    serveTasks = _loadTasks().filter(t => t.type === 'serve' && t.status === 'running');
+    serveTasks = _loadTasks().filter(t => t.type === 'serve' && _isTaskRuntimeActive(t));
   } catch {
     _serveReachabilityInFlight = false;
     return;

@@ -1131,6 +1131,14 @@ def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:
     # HTTP access logs (e.g. GET /v1/models 200 OK) mean the server is up and serving
     if re.search(r'(?:GET|POST)\s+/[^\s]*\s+HTTP/[\d.]+"\s*\d{3}', flat):
         return {"phase": "idle", "status": "ready"}
+    # Native llama.cpp does not emit Uvicorn's startup marker. Generation
+    # activity still proves readiness after its startup scrollback is gone.
+    native_ready = list(re.finditer(r'server is listening on|slot\s+(?:print_timing|launch_slot_|release)\s*:', flat, re.I))
+    if native_ready:
+        exits = list(re.finditer(r'===\s*process exited with code\s+-?\d+|:::EXIT_CODE:::\s*-?\d+', flat, re.I))
+        if exits and exits[-1].start() > native_ready[-1].start():
+            return {}
+        return {"phase": "ready", "status": "ready"}
     if "Loading weights took" in flat:
         return {"phase": "initializing", "status": "running"}
     # "GPU KV cache" alone (during allocation) — not "GPU KV cache usage" (runtime log)
